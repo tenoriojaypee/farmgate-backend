@@ -36,6 +36,9 @@ app.post("/delete-image", async (req, res) => {
     return res.status(500).json({ error: error.message });
   }
 });
+app.get("/", (req, res) => {
+  res.send("Backend running...");
+});
 
 // START SERVER
 const PORT = process.env.PORT || 5000;
