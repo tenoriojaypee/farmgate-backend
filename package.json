@@ -1,19 +1,24 @@
 {
   "name": "farmgate-backend",
   "version": "1.0.0",
-  "description": "",
+  "description": "FarmGate backend for Cloudinary, Xendit, Firebase Admin and Firestore",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node index.js",
+    "dev": "node --watch index.js"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
+  "engines": {
+    "node": "22.x"
+  },
   "dependencies": {
     "cloudinary": "^2.10.0",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
-    "express": "^5.2.1"
+    "express": "^5.2.1",
+    "firebase-admin": "^14.3.0"
   }
 }
