@@ -560,6 +560,18 @@ const validateOrderForPayment =
         }
 
         /* ---------------------------------------------------
+           FARMER ACCEPTANCE REQUIRED
+        --------------------------------------------------- */
+        if (
+          order.status !==
+          "accepted"
+        ) {
+          throw new Error(
+            "The farmer must accept the order before GCash payment."
+          );
+        }
+
+        /* ---------------------------------------------------
            ALREADY PAID
         --------------------------------------------------- */
 
@@ -1826,6 +1838,24 @@ app.post(
       }
 
       /* ---------------------------------------------------
+         FARMER ACCEPTANCE REQUIRED
+      --------------------------------------------------- */
+
+      if (
+        order.status !==
+        "accepted"
+      ) {
+        return res.status(409).json({
+          success: false,
+          error:
+            "The farmer must accept the order before GCash payment.",
+          orderStatus:
+            order.status ||
+            "pending",
+        });
+      }
+
+      /* ---------------------------------------------------
          CANCELLED
       --------------------------------------------------- */
 
@@ -2928,6 +2958,60 @@ app.post(
           success: true,
           message:
             "Payment received for cancelled order; manual review required.",
+        });
+      }
+
+      /* ---------------------------------------------------
+         FARMER ACCEPTANCE CHECK
+      --------------------------------------------------- */
+      if (
+        order.status !==
+        "accepted" &&
+        order.status !==
+        "processing"
+      ) {
+        await orderRef.update({
+          paymentStatus:
+            "paid",
+          xenditPaymentId:
+            data.payment_id ||
+            null,
+          xenditPaymentRequestId:
+            data.payment_request_id ||
+            null,
+          xenditReferenceId:
+            data.reference_id ||
+            null,
+          xenditPaymentChannel:
+            data.channel_code ||
+            "GCASH",
+          xenditPaymentStatus:
+            data.status ||
+            "SUCCEEDED",
+          paidAt:
+            FieldValue.serverTimestamp(),
+          inventoryFulfilled:
+            false,
+          fulfillmentStatus:
+            "manual_review",
+          fulfillmentError:
+            "Payment was received but the order was not in an accepted/processing state.",
+          xenditWebhookEvent:
+            "payment.capture",
+          xenditWebhookReceivedAt:
+            FieldValue.serverTimestamp(),
+          updatedAt:
+            FieldValue.serverTimestamp(),
+        });
+
+        console.error(
+          `Payment captured for order ${orderSnap.id} without valid farmer acceptance. Manual review required.`
+        );
+
+        return res.status(200).json({
+          success: true,
+          message:
+            "Payment received but order state requires manual review.",
         });
       }
 
