@@ -35,7 +35,10 @@ app.use(
 const getEnv = (name) => {
   const value = process.env[name];
 
-  if (typeof value !== "string" || value.trim() === "") {
+  if (
+    typeof value !== "string" ||
+    value.trim() === ""
+  ) {
     return undefined;
   }
 
@@ -46,12 +49,18 @@ const getEnv = (name) => {
    FIREBASE ADMIN
 ========================================================= */
 
-const firebaseProjectId = getEnv("FIREBASE_PROJECT_ID");
-const firebaseClientEmail = getEnv("FIREBASE_CLIENT_EMAIL");
+const firebaseProjectId =
+  getEnv("FIREBASE_PROJECT_ID");
 
-const firebasePrivateKey = process.env.FIREBASE_PRIVATE_KEY
-  ? process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n").trim()
-  : undefined;
+const firebaseClientEmail =
+  getEnv("FIREBASE_CLIENT_EMAIL");
+
+const firebasePrivateKey =
+  process.env.FIREBASE_PRIVATE_KEY
+    ? process.env.FIREBASE_PRIVATE_KEY
+        .replace(/\\n/g, "\n")
+        .trim()
+    : undefined;
 
 if (
   !firebaseProjectId ||
@@ -68,9 +77,12 @@ const firebaseApp =
     ? getApp()
     : initializeApp({
         credential: cert({
-          projectId: firebaseProjectId,
-          clientEmail: firebaseClientEmail,
-          privateKey: firebasePrivateKey,
+          projectId:
+            firebaseProjectId,
+          clientEmail:
+            firebaseClientEmail,
+          privateKey:
+            firebasePrivateKey,
         }),
       });
 
@@ -81,9 +93,14 @@ const auth = getAuth(firebaseApp);
    CLOUDINARY
 ========================================================= */
 
-const cloudinaryCloudName = getEnv("CLOUD_NAME");
-const cloudinaryApiKey = getEnv("CLOUD_API_KEY");
-const cloudinaryApiSecret = getEnv("CLOUD_API_SECRET");
+const cloudinaryCloudName =
+  getEnv("CLOUD_NAME");
+
+const cloudinaryApiKey =
+  getEnv("CLOUD_API_KEY");
+
+const cloudinaryApiSecret =
+  getEnv("CLOUD_API_SECRET");
 
 if (
   !cloudinaryCloudName ||
@@ -105,8 +122,11 @@ cloudinary.config({
    XENDIT
 ========================================================= */
 
-const XENDIT_BASE_URL = "https://api.xendit.co";
-const XENDIT_API_VERSION = "2024-11-11";
+const XENDIT_BASE_URL =
+  "https://api.xendit.co";
+
+const XENDIT_API_VERSION =
+  "2024-11-11";
 
 /* =========================================================
    CUSTOM STOCK ERROR
@@ -115,8 +135,10 @@ const XENDIT_API_VERSION = "2024-11-11";
 class StockFulfillmentError extends Error {
   constructor(message) {
     super(message);
-    this.name = "StockFulfillmentError";
-    this.code = "STOCK_UNAVAILABLE";
+    this.name =
+      "StockFulfillmentError";
+    this.code =
+      "STOCK_UNAVAILABLE";
   }
 }
 
@@ -125,13 +147,18 @@ class StockFulfillmentError extends Error {
 ========================================================= */
 
 const getXenditAuthHeader = () => {
-  const secretKey = getEnv("XENDIT_SECRET_KEY");
+  const secretKey =
+    getEnv("XENDIT_SECRET_KEY");
 
   if (!secretKey) {
-    throw new Error("XENDIT_SECRET_KEY is not configured.");
+    throw new Error(
+      "XENDIT_SECRET_KEY is not configured."
+    );
   }
 
-  const encoded = Buffer.from(`${secretKey}:`).toString("base64");
+  const encoded = Buffer.from(
+    `${secretKey}:`
+  ).toString("base64");
 
   return `Basic ${encoded}`;
 };
@@ -140,23 +167,35 @@ const getXenditAuthHeader = () => {
    XENDIT REQUEST
 ========================================================= */
 
-const xenditRequest = async (path, options = {}) => {
-  const response = await fetch(`${XENDIT_BASE_URL}${path}`, {
-    ...options,
-    headers: {
-      Authorization: getXenditAuthHeader(),
-      "Content-Type": "application/json",
-      "api-version": XENDIT_API_VERSION,
-      ...(options.headers || {}),
-    },
-  });
+const xenditRequest = async (
+  path,
+  options = {}
+) => {
+  const response = await fetch(
+    `${XENDIT_BASE_URL}${path}`,
+    {
+      ...options,
+      headers: {
+        Authorization:
+          getXenditAuthHeader(),
+        "Content-Type":
+          "application/json",
+        "api-version":
+          XENDIT_API_VERSION,
+        ...(options.headers || {}),
+      },
+    }
+  );
 
-  const text = await response.text();
+  const text =
+    await response.text();
 
   let data = {};
 
   try {
-    data = text ? JSON.parse(text) : {};
+    data = text
+      ? JSON.parse(text)
+      : {};
   } catch {
     data = {
       raw: text,
@@ -164,13 +203,16 @@ const xenditRequest = async (path, options = {}) => {
   }
 
   if (!response.ok) {
-    const error = new Error(
-      data?.message ||
-        data?.error_code ||
-        `Xendit request failed with status ${response.status}`
-    );
+    const error =
+      new Error(
+        data?.message ||
+          data?.error_code ||
+          `Xendit request failed with status ${response.status}`
+      );
 
-    error.status = response.status;
+    error.status =
+      response.status;
+
     error.response = data;
 
     throw error;
@@ -183,28 +225,40 @@ const xenditRequest = async (path, options = {}) => {
    FIREBASE AUTH VERIFICATION
 ========================================================= */
 
-const verifyFirebaseUser = async (req) => {
-  const authorization = req.headers.authorization;
+const verifyFirebaseUser =
+  async (req) => {
+    const authorization =
+      req.headers.authorization;
 
-  if (
-    !authorization ||
-    !authorization.startsWith("Bearer ")
-  ) {
-    throw new Error(
-      "Missing Firebase authentication token."
+    if (
+      !authorization ||
+      !authorization.startsWith(
+        "Bearer "
+      )
+    ) {
+      throw new Error(
+        "Missing Firebase authentication token."
+      );
+    }
+
+    const token =
+      authorization.substring(
+        "Bearer ".length
+      );
+
+    return await auth.verifyIdToken(
+      token
     );
-  }
-
-  const token = authorization.substring("Bearer ".length);
-
-  return await auth.verifyIdToken(token);
-};
+  };
 
 /* =========================================================
    SAFE STRING COMPARISON
 ========================================================= */
 
-const safeCompare = (first, second) => {
+const safeCompare = (
+  first,
+  second
+) => {
   if (
     typeof first !== "string" ||
     typeof second !== "string"
@@ -212,10 +266,16 @@ const safeCompare = (first, second) => {
     return false;
   }
 
-  const firstBuffer = Buffer.from(first, "utf8");
-  const secondBuffer = Buffer.from(second, "utf8");
+  const firstBuffer =
+    Buffer.from(first, "utf8");
 
-  if (firstBuffer.length !== secondBuffer.length) {
+  const secondBuffer =
+    Buffer.from(second, "utf8");
+
+  if (
+    firstBuffer.length !==
+    secondBuffer.length
+  ) {
     return false;
   }
 
@@ -229,16 +289,25 @@ const safeCompare = (first, second) => {
    REDIRECT URL
 ========================================================= */
 
-const getRedirectUrl = (actions) => {
+const getRedirectUrl = (
+  actions
+) => {
   if (!Array.isArray(actions)) {
     return null;
   }
 
-  const redirectAction = actions.find(
-    (action) => action?.type === "REDIRECT_CUSTOMER"
-  );
+  const redirectAction =
+    actions.find(
+      (action) =>
+        action?.type ===
+        "REDIRECT_CUSTOMER"
+    );
 
-  return redirectAction?.value || null;
+  return (
+    redirectAction?.value ||
+    redirectAction?.url ||
+    null
+  );
 };
 
 /* =========================================================
@@ -250,22 +319,35 @@ const toMillis = (value) => {
     return 0;
   }
 
-  if (typeof value.toMillis === "function") {
+  if (
+    typeof value.toMillis ===
+    "function"
+  ) {
     return value.toMillis();
   }
 
-  if (typeof value.seconds === "number") {
+  if (
+    typeof value.seconds ===
+    "number"
+  ) {
     return value.seconds * 1000;
   }
 
-  if (typeof value === "number") {
+  if (
+    typeof value === "number"
+  ) {
     return value;
   }
 
-  if (typeof value === "string") {
-    const parsed = new Date(value).getTime();
+  if (
+    typeof value === "string"
+  ) {
+    const parsed =
+      new Date(value).getTime();
 
-    return Number.isFinite(parsed) ? parsed : 0;
+    return Number.isFinite(parsed)
+      ? parsed
+      : 0;
   }
 
   return 0;
@@ -275,15 +357,19 @@ const toMillis = (value) => {
    FRESHNESS
 ========================================================= */
 
-const getFreshnessLabel = (batch) => {
+const getFreshnessLabel = (
+  batch
+) => {
   if (!batch?.weekEnd) {
     return batch?.freshness || "";
   }
 
-  const MS_PER_DAY = 24 * 60 * 60 * 1000;
+  const MS_PER_DAY =
+    24 * 60 * 60 * 1000;
 
   const daysAgo = Math.floor(
-    (Date.now() - toMillis(batch.weekEnd)) /
+    (Date.now() -
+      toMillis(batch.weekEnd)) /
       MS_PER_DAY
   );
 
@@ -296,18 +382,28 @@ const getFreshnessLabel = (batch) => {
    GET CURRENT BATCH
 ========================================================= */
 
-const getCurrentBatch = (snapshot) => {
-  const batches = snapshot.docs
-    .map((docSnap) => ({
-      id: docSnap.id,
-      ...docSnap.data(),
-    }))
-    .filter((batch) => batch.archived !== true)
-    .sort(
-      (first, second) =>
-        Number(second.batchNumber || 0) -
-        Number(first.batchNumber || 0)
-    );
+const getCurrentBatch = (
+  snapshot
+) => {
+  const batches =
+    snapshot.docs
+      .map((docSnap) => ({
+        id: docSnap.id,
+        ...docSnap.data(),
+      }))
+      .filter(
+        (batch) =>
+          batch.archived !== true
+      )
+      .sort(
+        (first, second) =>
+          Number(
+            second.batchNumber || 0
+          ) -
+          Number(
+            first.batchNumber || 0
+          )
+      );
 
   return batches[0] || null;
 };
@@ -316,902 +412,1251 @@ const getCurrentBatch = (snapshot) => {
    FIND ORDER FROM XENDIT WEBHOOK
 ========================================================= */
 
-const findOrderFromWebhook = async (data) => {
-  /* -------------------------------------------------------
-     1. metadata.orderId
-  ------------------------------------------------------- */
+const findOrderFromWebhook =
+  async (data) => {
+    /* -------------------------------------------------------
+       1. metadata.orderId
+    ------------------------------------------------------- */
 
-  const metadataOrderId =
-    data?.metadata?.orderId ||
-    data?.metadata?.order_id ||
-    null;
+    const metadataOrderId =
+      data?.metadata?.orderId ||
+      data?.metadata?.order_id ||
+      null;
 
-  if (metadataOrderId) {
-    const orderSnap = await db
-      .collection("orders")
-      .doc(String(metadataOrderId))
-      .get();
+    if (metadataOrderId) {
+      const orderSnap =
+        await db
+          .collection("orders")
+          .doc(
+            String(
+              metadataOrderId
+            )
+          )
+          .get();
 
-    if (orderSnap.exists) {
-      return orderSnap;
-    }
-  }
-
-  /* -------------------------------------------------------
-     2. payment_request_id
-  ------------------------------------------------------- */
-
-  if (data?.payment_request_id) {
-    const querySnapshot = await db
-      .collection("orders")
-      .where(
-        "xenditPaymentRequestId",
-        "==",
-        data.payment_request_id
-      )
-      .limit(1)
-      .get();
-
-    if (!querySnapshot.empty) {
-      return querySnapshot.docs[0];
-    }
-  }
-
-  /* -------------------------------------------------------
-     3. xenditReferenceId
-  ------------------------------------------------------- */
-
-  if (data?.reference_id) {
-    const referenceSnapshot = await db
-      .collection("orders")
-      .where(
-        "xenditReferenceId",
-        "==",
-        data.reference_id
-      )
-      .limit(1)
-      .get();
-
-    if (!referenceSnapshot.empty) {
-      return referenceSnapshot.docs[0];
+      if (orderSnap.exists) {
+        return orderSnap;
+      }
     }
 
-    /* -----------------------------------------------------
-       4. orderNumber fallback
-    ----------------------------------------------------- */
+    /* -------------------------------------------------------
+       2. payment_request_id
+    ------------------------------------------------------- */
 
-    const orderNumberSnapshot = await db
-      .collection("orders")
-      .where(
-        "orderNumber",
-        "==",
-        data.reference_id
-      )
-      .limit(1)
-      .get();
+    if (data?.payment_request_id) {
+      const querySnapshot =
+        await db
+          .collection("orders")
+          .where(
+            "xenditPaymentRequestId",
+            "==",
+            data.payment_request_id
+          )
+          .limit(1)
+          .get();
 
-    if (!orderNumberSnapshot.empty) {
-      return orderNumberSnapshot.docs[0];
+      if (!querySnapshot.empty) {
+        return querySnapshot.docs[0];
+      }
     }
-  }
 
-  return null;
-};
+    /* -------------------------------------------------------
+       3. xenditReferenceId
+    ------------------------------------------------------- */
+
+    if (data?.reference_id) {
+      const referenceSnapshot =
+        await db
+          .collection("orders")
+          .where(
+            "xenditReferenceId",
+            "==",
+            data.reference_id
+          )
+          .limit(1)
+          .get();
+
+      if (
+        !referenceSnapshot.empty
+      ) {
+        return referenceSnapshot.docs[0];
+      }
+
+      /* -----------------------------------------------------
+         4. orderNumber fallback
+      ----------------------------------------------------- */
+
+      const orderNumberSnapshot =
+        await db
+          .collection("orders")
+          .where(
+            "orderNumber",
+            "==",
+            data.reference_id
+          )
+          .limit(1)
+          .get();
+
+      if (
+        !orderNumberSnapshot.empty
+      ) {
+        return orderNumberSnapshot.docs[0];
+      }
+    }
+
+    return null;
+  };
 
 /* =========================================================
    VALIDATE ORDER BEFORE PAYMENT
 ========================================================= */
 
-const validateOrderForPayment = async (orderRef) => {
-  return await db.runTransaction(async (transaction) => {
-    /* -----------------------------------------------------
-       READ ORDER
-    ----------------------------------------------------- */
+const validateOrderForPayment =
+  async (orderRef) => {
+    return await db.runTransaction(
+      async (transaction) => {
+        /* ---------------------------------------------------
+           READ ORDER
+        --------------------------------------------------- */
 
-    const orderSnap = await transaction.get(orderRef);
+        const orderSnap =
+          await transaction.get(
+            orderRef
+          );
 
-    if (!orderSnap.exists) {
-      throw new Error("Order not found.");
-    }
+        if (!orderSnap.exists) {
+          throw new Error(
+            "Order not found."
+          );
+        }
 
-    const order = orderSnap.data();
+        const order =
+          orderSnap.data();
 
-    /* -----------------------------------------------------
-       PAYMENT METHOD
-    ----------------------------------------------------- */
+        /* ---------------------------------------------------
+           PAYMENT METHOD
+        --------------------------------------------------- */
 
-    if (order.payment !== "gcash") {
-      throw new Error(
-        "Only GCash orders can use Xendit."
-      );
-    }
+        if (
+          order.payment !==
+          "gcash"
+        ) {
+          throw new Error(
+            "Only GCash orders can use Xendit."
+          );
+        }
 
-    /* -----------------------------------------------------
-       ORDER STATUS
-    ----------------------------------------------------- */
+        /* ---------------------------------------------------
+           ORDER STATUS
+        --------------------------------------------------- */
 
-    if (order.status === "cancelled") {
-      throw new Error(
-        "This order has already been cancelled."
-      );
-    }
+        if (
+          order.status ===
+          "cancelled"
+        ) {
+          throw new Error(
+            "This order has already been cancelled."
+          );
+        }
 
-    /* -----------------------------------------------------
-       ORDER PRODUCTS
-    ----------------------------------------------------- */
+        /* ---------------------------------------------------
+           ALREADY PAID
+        --------------------------------------------------- */
 
-    const orderProducts = Array.isArray(
-      order.products
-    )
-      ? order.products
-      : [];
+        if (
+          order.paymentStatus ===
+          "paid"
+        ) {
+          throw new Error(
+            "This order has already been paid."
+          );
+        }
 
-    if (orderProducts.length === 0) {
-      throw new Error(
-        "Order contains no products."
-      );
-    }
+        /* ---------------------------------------------------
+           ORDER PRODUCTS
+        --------------------------------------------------- */
 
-    const validatedProducts = [];
-    const seenProductIds = new Set();
+        const orderProducts =
+          Array.isArray(
+            order.products
+          )
+            ? order.products
+            : [];
 
-    let computedSubtotal = 0;
+        if (
+          orderProducts.length === 0
+        ) {
+          throw new Error(
+            "Order contains no products."
+          );
+        }
 
-    /* -----------------------------------------------------
-       VALIDATE EACH PRODUCT
-    ----------------------------------------------------- */
+        const validatedProducts =
+          [];
 
-    for (const orderProduct of orderProducts) {
-      const productId = String(
-        orderProduct.productId || ""
-      );
+        const seenProductIds =
+          new Set();
 
-      if (!productId) {
-        throw new Error(
-          "Order contains an invalid productId."
+        let computedSubtotal =
+          0;
+
+        /* ---------------------------------------------------
+           VALIDATE EACH PRODUCT
+        --------------------------------------------------- */
+
+        for (
+          const orderProduct of
+            orderProducts
+        ) {
+          const productId =
+            String(
+              orderProduct.productId ||
+                ""
+            );
+
+          if (!productId) {
+            throw new Error(
+              "Order contains an invalid productId."
+            );
+          }
+
+          if (
+            seenProductIds.has(
+              productId
+            )
+          ) {
+            throw new Error(
+              `Duplicate product in order: ${productId}`
+            );
+          }
+
+          seenProductIds.add(
+            productId
+          );
+
+          const quantity =
+            Number(
+              orderProduct.quantity
+            );
+
+          if (
+            !Number.isFinite(
+              quantity
+            ) ||
+            quantity <= 0
+          ) {
+            throw new Error(
+              `Invalid quantity for ${productId}.`
+            );
+          }
+
+          /* -----------------------------------------------
+             PRODUCT
+          ------------------------------------------------ */
+
+          const productRef =
+            db
+              .collection(
+                "products"
+              )
+              .doc(productId);
+
+          const productSnap =
+            await transaction.get(
+              productRef
+            );
+
+          if (!productSnap.exists) {
+            throw new Error(
+              `Product ${productId} not found.`
+            );
+          }
+
+          const product =
+            productSnap.data();
+
+          /* -----------------------------------------------
+             FARMER CHECK
+          ------------------------------------------------ */
+
+          if (
+            product.farmerId !==
+            order.farmerId
+          ) {
+            throw new Error(
+              `Product ${productId} does not belong to this farmer.`
+            );
+          }
+
+          /* -----------------------------------------------
+             ARCHIVED CHECK
+          ------------------------------------------------ */
+
+          if (
+            product.archived ===
+            true
+          ) {
+            throw new Error(
+              `Product ${
+                product.name ||
+                productId
+              } is archived.`
+            );
+          }
+
+          /* -----------------------------------------------
+             SERVER PRICE
+          ------------------------------------------------ */
+
+          const price =
+            Number(product.price);
+
+          if (
+            !Number.isFinite(
+              price
+            ) ||
+            price < 0
+          ) {
+            throw new Error(
+              `Invalid price for ${
+                product.name ||
+                productId
+              }.`
+            );
+          }
+
+          /* -----------------------------------------------
+             BATCHES
+          ------------------------------------------------ */
+
+          const batchQuery =
+            db
+              .collection(
+                "productBatches"
+              )
+              .where(
+                "productId",
+                "==",
+                productId
+              );
+
+          const batchSnapshot =
+            await transaction.get(
+              batchQuery
+            );
+
+          const currentBatch =
+            getCurrentBatch(
+              batchSnapshot
+            );
+
+          if (!currentBatch) {
+            throw new StockFulfillmentError(
+              `No current batch found for ${
+                product.name ||
+                productId
+              }.`
+            );
+          }
+
+          const currentStock =
+            Number(
+              currentBatch.stock
+            );
+
+          if (
+            currentBatch.status !==
+              "Available" ||
+            !Number.isFinite(
+              currentStock
+            ) ||
+            currentStock <= 0
+          ) {
+            throw new StockFulfillmentError(
+              `${
+                product.name ||
+                productId
+              } is out of stock.`
+            );
+          }
+
+          if (
+            currentStock <
+            quantity
+          ) {
+            throw new StockFulfillmentError(
+              `Insufficient stock for ${
+                product.name ||
+                productId
+              }. Available: ${currentStock}, Requested: ${quantity}.`
+            );
+          }
+
+          /* -----------------------------------------------
+             LINE TOTAL
+          ------------------------------------------------ */
+
+          const lineTotal =
+            Number(
+              (
+                price *
+                quantity
+              ).toFixed(2)
+            );
+
+          computedSubtotal +=
+            lineTotal;
+
+          validatedProducts.push({
+            productId,
+
+            batchId: null,
+
+            batchNumber: null,
+
+            harvestRecordId: null,
+
+            contributions: [],
+
+            name:
+              product.name ||
+              orderProduct.name ||
+              "",
+
+            image:
+              product.image ||
+              orderProduct.image ||
+              "",
+
+            price,
+
+            quantity,
+
+            unit:
+              product.unit ||
+              orderProduct.unit ||
+              "",
+
+            reviewed:
+              orderProduct.reviewed ||
+              false,
+          });
+        }
+
+        /* ---------------------------------------------------
+           DELIVERY
+        --------------------------------------------------- */
+
+        const delivery =
+          order.delivery ===
+          "delivery"
+            ? "delivery"
+            : "pickup";
+
+        const deliveryFee =
+          delivery === "delivery"
+            ? 35
+            : 0;
+
+        const finalSubtotal =
+          Number(
+            computedSubtotal.toFixed(
+              2
+            )
+          );
+
+        const finalTotal =
+          Number(
+            (
+              finalSubtotal +
+              deliveryFee
+            ).toFixed(2)
+          );
+
+        /* ---------------------------------------------------
+           GCASH LIMITS
+        --------------------------------------------------- */
+
+        if (finalTotal < 1) {
+          throw new Error(
+            "GCash payment must be at least ₱1.00."
+          );
+        }
+
+        if (
+          finalTotal >
+          100000
+        ) {
+          throw new Error(
+            "GCash payment cannot exceed ₱100,000.00."
+          );
+        }
+
+        /* ---------------------------------------------------
+           LOCK SERVER VALUES
+        --------------------------------------------------- */
+
+        transaction.update(
+          orderRef,
+          {
+            products:
+              validatedProducts,
+
+            subTotal:
+              finalSubtotal,
+
+            deliveryFee,
+
+            total:
+              finalTotal,
+
+            payment:
+              "gcash",
+
+            paymentStatus:
+              "pending",
+
+            inventoryFulfilled:
+              false,
+
+            fulfillmentStatus:
+              "pending",
+
+            serverValidated:
+              true,
+
+            serverValidatedAt:
+              FieldValue.serverTimestamp(),
+
+            updatedAt:
+              FieldValue.serverTimestamp(),
+          }
         );
+
+        return {
+          orderId:
+            orderSnap.id,
+
+          orderNumber:
+            order.orderNumber ||
+            null,
+
+          buyerId:
+            order.buyerId,
+
+          farmerId:
+            order.farmerId,
+
+          farmName:
+            order.farmName ||
+            null,
+
+          total:
+            finalTotal,
+
+          subtotal:
+            finalSubtotal,
+
+          deliveryFee,
+
+          products:
+            validatedProducts,
+        };
       }
-
-      if (seenProductIds.has(productId)) {
-        throw new Error(
-          `Duplicate product in order: ${productId}`
-        );
-      }
-
-      seenProductIds.add(productId);
-
-      const quantity = Number(
-        orderProduct.quantity
-      );
-
-      if (
-        !Number.isFinite(quantity) ||
-        quantity <= 0
-      ) {
-        throw new Error(
-          `Invalid quantity for ${productId}.`
-        );
-      }
-
-      /* ---------------------------------------------------
-         PRODUCT
-      --------------------------------------------------- */
-
-      const productRef = db
-        .collection("products")
-        .doc(productId);
-
-      const productSnap = await transaction.get(
-        productRef
-      );
-
-      if (!productSnap.exists) {
-        throw new Error(
-          `Product ${productId} not found.`
-        );
-      }
-
-      const product = productSnap.data();
-
-      /* ---------------------------------------------------
-         FARMER CHECK
-      --------------------------------------------------- */
-
-      if (product.farmerId !== order.farmerId) {
-        throw new Error(
-          `Product ${productId} does not belong to this farmer.`
-        );
-      }
-
-      /* ---------------------------------------------------
-         ARCHIVED CHECK
-      --------------------------------------------------- */
-
-      if (product.archived === true) {
-        throw new Error(
-          `Product ${
-            product.name || productId
-          } is archived.`
-        );
-      }
-
-      /* ---------------------------------------------------
-         SERVER PRICE
-      --------------------------------------------------- */
-
-      const price = Number(product.price);
-
-      if (
-        !Number.isFinite(price) ||
-        price < 0
-      ) {
-        throw new Error(
-          `Invalid price for ${
-            product.name || productId
-          }.`
-        );
-      }
-
-      /* ---------------------------------------------------
-         BATCHES
-      --------------------------------------------------- */
-
-      const batchQuery = db
-        .collection("productBatches")
-        .where("productId", "==", productId);
-
-      const batchSnapshot = await transaction.get(
-        batchQuery
-      );
-
-      const currentBatch =
-        getCurrentBatch(batchSnapshot);
-
-      if (!currentBatch) {
-        throw new StockFulfillmentError(
-          `No current batch found for ${
-            product.name || productId
-          }.`
-        );
-      }
-
-      const currentStock = Number(
-        currentBatch.stock
-      );
-
-      if (
-        currentBatch.status !== "Available" ||
-        currentStock <= 0
-      ) {
-        throw new StockFulfillmentError(
-          `${
-            product.name || productId
-          } is out of stock.`
-        );
-      }
-
-      if (currentStock < quantity) {
-        throw new StockFulfillmentError(
-          `Insufficient stock for ${
-            product.name || productId
-          }. Available: ${currentStock}, Requested: ${quantity}.`
-        );
-      }
-
-      /* ---------------------------------------------------
-         SERVER-CALCULATED LINE TOTAL
-      --------------------------------------------------- */
-
-      const lineTotal = Number(
-        (price * quantity).toFixed(2)
-      );
-
-      computedSubtotal += lineTotal;
-
-      validatedProducts.push({
-        productId,
-        batchId: null,
-        batchNumber: null,
-        harvestRecordId: null,
-        contributions: [],
-        name:
-          product.name ||
-          orderProduct.name ||
-          "",
-        image:
-          product.image ||
-          orderProduct.image ||
-          "",
-        price,
-        quantity,
-        unit:
-          product.unit ||
-          orderProduct.unit ||
-          "",
-        reviewed:
-          orderProduct.reviewed || false,
-      });
-    }
-
-    /* -----------------------------------------------------
-       DELIVERY
-    ----------------------------------------------------- */
-
-    const delivery =
-      order.delivery === "delivery"
-        ? "delivery"
-        : "pickup";
-
-    const deliveryFee =
-      delivery === "delivery" ? 35 : 0;
-
-    const finalSubtotal = Number(
-      computedSubtotal.toFixed(2)
     );
-
-    const finalTotal = Number(
-      (
-        finalSubtotal +
-        deliveryFee
-      ).toFixed(2)
-    );
-
-    /* -----------------------------------------------------
-       GCASH PAYMENT LIMITS
-    ----------------------------------------------------- */
-
-    if (finalTotal < 1) {
-      throw new Error(
-        "GCash payment must be at least ₱1.00."
-      );
-    }
-
-    if (finalTotal > 100000) {
-      throw new Error(
-        "GCash payment cannot exceed ₱100,000.00."
-      );
-    }
-
-    /* -----------------------------------------------------
-       LOCK SERVER VALUES
-    ----------------------------------------------------- */
-
-    transaction.update(orderRef, {
-      products: validatedProducts,
-      subTotal: finalSubtotal,
-      deliveryFee,
-      total: finalTotal,
-      payment: "gcash",
-      paymentStatus: "pending",
-      inventoryFulfilled: false,
-      fulfillmentStatus: "pending",
-      serverValidated: true,
-      serverValidatedAt:
-        FieldValue.serverTimestamp(),
-      updatedAt:
-        FieldValue.serverTimestamp(),
-    });
-
-    return {
-      orderId: orderSnap.id,
-      orderNumber:
-        order.orderNumber || null,
-      buyerId: order.buyerId,
-      total: finalTotal,
-      subtotal: finalSubtotal,
-      deliveryFee,
-      products: validatedProducts,
-    };
-  });
-};
+  };
 
 /* =========================================================
    FULFILL PAID ORDER
 ========================================================= */
 
-const fulfillPaidOrder = async (
-  orderRef,
-  paymentData
-) => {
-  return await db.runTransaction(async (transaction) => {
-    /* -----------------------------------------------------
-       READ ORDER
-    ----------------------------------------------------- */
+const fulfillPaidOrder =
+  async (
+    orderRef,
+    paymentData
+  ) => {
+    return await db.runTransaction(
+      async (transaction) => {
+        /* ---------------------------------------------------
+           READ ORDER
+        --------------------------------------------------- */
 
-    const orderSnap = await transaction.get(orderRef);
-
-    if (!orderSnap.exists) {
-      throw new Error("Order not found.");
-    }
-
-    const order = orderSnap.data();
-
-    /* -----------------------------------------------------
-       IDEMPOTENCY
-    ----------------------------------------------------- */
-
-    if (order.inventoryFulfilled === true) {
-      return {
-        alreadyFulfilled: true,
-      };
-    }
-
-    /* -----------------------------------------------------
-       PAYMENT METHOD
-    ----------------------------------------------------- */
-
-    if (order.payment !== "gcash") {
-      throw new Error(
-        "Only GCash orders can be fulfilled here."
-      );
-    }
-
-    /* -----------------------------------------------------
-       AMOUNT CHECK
-    ----------------------------------------------------- */
-
-    const orderTotal = Number(order.total);
-
-    const capturedAmount = Number(
-      paymentData?.captures?.[0]
-        ?.capture_amount ??
-        paymentData?.request_amount
-    );
-
-    if (
-      !Number.isFinite(orderTotal) ||
-      !Number.isFinite(capturedAmount)
-    ) {
-      throw new Error(
-        "Invalid payment amount."
-      );
-    }
-
-    if (
-      Math.abs(
-        orderTotal - capturedAmount
-      ) > 0.01
-    ) {
-      throw new Error(
-        `Payment amount mismatch. Order: ₱${orderTotal}, Xendit: ₱${capturedAmount}.`
-      );
-    }
-
-    /* -----------------------------------------------------
-       PAYMENT REQUEST ID CHECK
-    ----------------------------------------------------- */
-
-    if (
-      order.xenditPaymentRequestId &&
-      paymentData?.payment_request_id &&
-      order.xenditPaymentRequestId !==
-        paymentData.payment_request_id
-    ) {
-      throw new Error(
-        "Xendit payment request ID does not match the order."
-      );
-    }
-
-    /* -----------------------------------------------------
-       REFERENCE CHECK
-    ----------------------------------------------------- */
-
-    if (
-      order.xenditReferenceId &&
-      paymentData?.reference_id &&
-      order.xenditReferenceId !==
-        paymentData.reference_id
-    ) {
-      throw new Error(
-        "Xendit reference ID does not match the order."
-      );
-    }
-
-    /* -----------------------------------------------------
-       PRODUCTS
-    ----------------------------------------------------- */
-
-    const orderProducts = Array.isArray(
-      order.products
-    )
-      ? order.products
-      : [];
-
-    if (orderProducts.length === 0) {
-      throw new Error(
-        "Order contains no products."
-      );
-    }
-
-    const plans = [];
-    const updatedProducts = [];
-
-    /* -----------------------------------------------------
-       READ + CALCULATE FIFO
-    ----------------------------------------------------- */
-
-    for (const orderProduct of orderProducts) {
-      const productId = String(
-        orderProduct.productId || ""
-      );
-
-      const quantity = Number(
-        orderProduct.quantity
-      );
-
-      if (!productId) {
-        throw new Error(
-          "Invalid product ID in order."
-        );
-      }
-
-      if (
-        !Number.isFinite(quantity) ||
-        quantity <= 0
-      ) {
-        throw new Error(
-          `Invalid quantity for ${productId}.`
-        );
-      }
-
-      /* ---------------------------------------------------
-         PRODUCT
-      --------------------------------------------------- */
-
-      const productRef = db
-        .collection("products")
-        .doc(productId);
-
-      const productSnap = await transaction.get(
-        productRef
-      );
-
-      if (!productSnap.exists) {
-        throw new Error(
-          `Product ${productId} not found.`
-        );
-      }
-
-      const product = productSnap.data();
-
-      /* ---------------------------------------------------
-         BATCHES
-      --------------------------------------------------- */
-
-      const batchQuery = db
-        .collection("productBatches")
-        .where("productId", "==", productId);
-
-      const batchSnapshot = await transaction.get(
-        batchQuery
-      );
-
-      const currentBatch =
-        getCurrentBatch(batchSnapshot);
-
-      if (!currentBatch) {
-        throw new StockFulfillmentError(
-          `No current batch found for ${
-            product.name ||
-            orderProduct.name ||
-            productId
-          }.`
-        );
-      }
-
-      const currentStock = Number(
-        currentBatch.stock
-      );
-
-      if (
-        currentBatch.status !== "Available" ||
-        currentStock <= 0
-      ) {
-        throw new StockFulfillmentError(
-          `${
-            product.name ||
-            orderProduct.name ||
-            productId
-          } is out of stock.`
-        );
-      }
-
-      if (currentStock < quantity) {
-        throw new StockFulfillmentError(
-          `Insufficient stock for ${
-            product.name ||
-            orderProduct.name ||
-            productId
-          }. Available: ${currentStock}, Requested: ${quantity}.`
-        );
-      }
-
-      /* ---------------------------------------------------
-         HARVEST RECORDS
-      --------------------------------------------------- */
-
-      const harvestQuery = db
-        .collection("harvestRecords")
-        .where(
-          "batchId",
-          "==",
-          currentBatch.id
-        );
-
-      const harvestSnapshot =
-        await transaction.get(
-          harvestQuery
-        );
-
-      /* ---------------------------------------------------
-         OLDEST HARVEST FIRST = FIFO
-      --------------------------------------------------- */
-
-      const harvestRecords =
-        harvestSnapshot.docs
-          .map((harvestDoc) => ({
-            id: harvestDoc.id,
-            ...harvestDoc.data(),
-          }))
-          .sort(
-            (first, second) =>
-              toMillis(first.harvestDate) -
-              toMillis(second.harvestDate)
-          )
-          .filter(
-            (record) =>
-              Number(
-                record.remainingQuantity || 0
-              ) > 0
+        const orderSnap =
+          await transaction.get(
+            orderRef
           );
 
-      const contributions = [];
-      const harvestUpdates = [];
-
-      let remaining = quantity;
-
-      /* ---------------------------------------------------
-         FIFO LOOP
-      --------------------------------------------------- */
-
-      for (const record of harvestRecords) {
-        if (remaining <= 0) {
-          break;
+        if (!orderSnap.exists) {
+          throw new Error(
+            "Order not found."
+          );
         }
 
-        const available = Number(
-          record.remainingQuantity || 0
-        );
+        const order =
+          orderSnap.data();
 
-        const take = Math.min(
-          available,
-          remaining
-        );
+        /* ---------------------------------------------------
+           IDEMPOTENCY
+        --------------------------------------------------- */
 
-        const newRemaining = Number(
-          (
-            available - take
-          ).toFixed(6)
-        );
+        if (
+          order.inventoryFulfilled ===
+          true
+        ) {
+          return {
+            alreadyFulfilled:
+              true,
+          };
+        }
 
-        harvestUpdates.push({
-          ref: db
-            .collection("harvestRecords")
-            .doc(record.id),
-          remainingQuantity:
-            newRemaining,
-        });
+        /* ---------------------------------------------------
+           PAYMENT METHOD
+        --------------------------------------------------- */
 
-        contributions.push({
-          batchId: currentBatch.id,
-          batchNumber:
-            currentBatch.batchNumber,
-          harvestRecordId: record.id,
-          quantity: take,
-        });
+        if (
+          order.payment !==
+          "gcash"
+        ) {
+          throw new Error(
+            "Only GCash orders can be fulfilled here."
+          );
+        }
 
-        remaining -= take;
-      }
+        /* ---------------------------------------------------
+           AMOUNT CHECK
+        --------------------------------------------------- */
 
-      /* ---------------------------------------------------
-         LEGACY FALLBACK
-      --------------------------------------------------- */
+        const orderTotal =
+          Number(order.total);
 
-      if (remaining > 0) {
-        contributions.push({
-          batchId: currentBatch.id,
-          batchNumber:
-            currentBatch.batchNumber,
-          harvestRecordId: null,
-          quantity: remaining,
-        });
+        const capturedAmount =
+          Number(
+            paymentData?.captures
+              ?.find(
+                (capture) =>
+                  capture?.status ===
+                  "SUCCEEDED"
+              )?.capture_amount ??
+              paymentData?.captures?.[0]
+                ?.capture_amount ??
+              paymentData?.request_amount
+          );
 
-        remaining = 0;
-      }
+        if (
+          !Number.isFinite(
+            orderTotal
+          ) ||
+          !Number.isFinite(
+            capturedAmount
+          )
+        ) {
+          throw new Error(
+            "Invalid payment amount."
+          );
+        }
 
-      /* ---------------------------------------------------
-         NEW BATCH STOCK
-      --------------------------------------------------- */
+        if (
+          Math.abs(
+            orderTotal -
+              capturedAmount
+          ) > 0.01
+        ) {
+          throw new Error(
+            `Payment amount mismatch. Order: ₱${orderTotal}, Xendit: ₱${capturedAmount}.`
+          );
+        }
 
-      const newStock = Number(
-        (
-          currentStock - quantity
-        ).toFixed(6)
-      );
+        /* ---------------------------------------------------
+           PAYMENT REQUEST ID CHECK
+        --------------------------------------------------- */
 
-      const newStatus =
-        newStock <= 0
-          ? "Out of Stock"
-          : "Available";
+        if (
+          order.xenditPaymentRequestId &&
+          paymentData?.payment_request_id &&
+          order.xenditPaymentRequestId !==
+            paymentData.payment_request_id
+        ) {
+          throw new Error(
+            "Xendit payment request ID does not match the order."
+          );
+        }
 
-      plans.push({
-        productId,
-        quantity,
-        batchRef: db
-          .collection("productBatches")
-          .doc(currentBatch.id),
-        newStock,
-        newStatus,
-        freshness:
-          getFreshnessLabel(currentBatch),
-        harvestUpdates,
-        contributions,
-      });
+        /* ---------------------------------------------------
+           REFERENCE CHECK
+        --------------------------------------------------- */
 
-      const primary =
-        contributions[0] || null;
+        if (
+          order.xenditReferenceId &&
+          paymentData?.reference_id &&
+          order.xenditReferenceId !==
+            paymentData.reference_id
+        ) {
+          throw new Error(
+            "Xendit reference ID does not match the order."
+          );
+        }
 
-      updatedProducts.push({
-        ...orderProduct,
-        batchId:
-          primary?.batchId ?? null,
-        batchNumber:
-          primary?.batchNumber ?? null,
-        harvestRecordId:
-          primary?.harvestRecordId ?? null,
-        contributions,
-      });
-    }
+        /* ---------------------------------------------------
+           PAYMENT SUCCESS CHECK
+        --------------------------------------------------- */
 
-    /* -----------------------------------------------------
-       WRITES START
-    ----------------------------------------------------- */
+        if (
+          paymentData?.status !==
+          "SUCCEEDED"
+        ) {
+          throw new Error(
+            "Payment was not successfully captured."
+          );
+        }
 
-    /* -----------------------------------------------------
-       1. HARVEST RECORDS
-    ----------------------------------------------------- */
+        /* ---------------------------------------------------
+           PRODUCTS
+        --------------------------------------------------- */
 
-    for (const plan of plans) {
-      for (const harvestUpdate of
-        plan.harvestUpdates) {
+        const orderProducts =
+          Array.isArray(
+            order.products
+          )
+            ? order.products
+            : [];
+
+        if (
+          orderProducts.length ===
+          0
+        ) {
+          throw new Error(
+            "Order contains no products."
+          );
+        }
+
+        const plans = [];
+
+        const updatedProducts =
+          [];
+
+        /* ---------------------------------------------------
+           READ + CALCULATE FIFO
+        --------------------------------------------------- */
+
+        for (
+          const orderProduct of
+            orderProducts
+        ) {
+          const productId =
+            String(
+              orderProduct.productId ||
+                ""
+            );
+
+          const quantity =
+            Number(
+              orderProduct.quantity
+            );
+
+          if (!productId) {
+            throw new Error(
+              "Invalid product ID in order."
+            );
+          }
+
+          if (
+            !Number.isFinite(
+              quantity
+            ) ||
+            quantity <= 0
+          ) {
+            throw new Error(
+              `Invalid quantity for ${productId}.`
+            );
+          }
+
+          /* -----------------------------------------------
+             PRODUCT
+          ------------------------------------------------ */
+
+          const productRef =
+            db
+              .collection(
+                "products"
+              )
+              .doc(productId);
+
+          const productSnap =
+            await transaction.get(
+              productRef
+            );
+
+          if (!productSnap.exists) {
+            throw new Error(
+              `Product ${productId} not found.`
+            );
+          }
+
+          const product =
+            productSnap.data();
+
+          /* -----------------------------------------------
+             FARMER CHECK
+          ------------------------------------------------ */
+
+          if (
+            product.farmerId !==
+            order.farmerId
+          ) {
+            throw new Error(
+              `Product ${productId} does not belong to the order farmer.`
+            );
+          }
+
+          /* -----------------------------------------------
+             BATCHES
+          ------------------------------------------------ */
+
+          const batchQuery =
+            db
+              .collection(
+                "productBatches"
+              )
+              .where(
+                "productId",
+                "==",
+                productId
+              );
+
+          const batchSnapshot =
+            await transaction.get(
+              batchQuery
+            );
+
+          const currentBatch =
+            getCurrentBatch(
+              batchSnapshot
+            );
+
+          if (!currentBatch) {
+            throw new StockFulfillmentError(
+              `No current batch found for ${
+                product.name ||
+                productId
+              }.`
+            );
+          }
+
+          const currentStock =
+            Number(
+              currentBatch.stock
+            );
+
+          if (
+            currentBatch.status !==
+              "Available" ||
+            !Number.isFinite(
+              currentStock
+            ) ||
+            currentStock <= 0
+          ) {
+            throw new StockFulfillmentError(
+              `${
+                product.name ||
+                productId
+              } is out of stock.`
+            );
+          }
+
+          if (
+            currentStock <
+            quantity
+          ) {
+            throw new StockFulfillmentError(
+              `Insufficient stock for ${
+                product.name ||
+                productId
+              }. Available: ${currentStock}, Requested: ${quantity}.`
+            );
+          }
+
+          /* -----------------------------------------------
+             HARVEST RECORDS
+          ------------------------------------------------ */
+
+          const harvestQuery =
+            db
+              .collection(
+                "harvestRecords"
+              )
+              .where(
+                "batchId",
+                "==",
+                currentBatch.id
+              );
+
+          const harvestSnapshot =
+            await transaction.get(
+              harvestQuery
+            );
+
+          /* -----------------------------------------------
+             FIFO
+          ------------------------------------------------ */
+
+          const harvestRecords =
+            harvestSnapshot.docs
+              .map(
+                (harvestDoc) => ({
+                  id: harvestDoc.id,
+                  ...harvestDoc.data(),
+                })
+              )
+              .sort(
+                (first, second) =>
+                  toMillis(
+                    first.harvestDate
+                  ) -
+                  toMillis(
+                    second.harvestDate
+                  )
+              )
+              .filter(
+                (record) =>
+                  Number(
+                    record.remainingQuantity ||
+                      0
+                  ) > 0
+              );
+
+          const contributions =
+            [];
+
+          const harvestUpdates =
+            [];
+
+          let remaining =
+            quantity;
+
+          /* -----------------------------------------------
+             FIFO LOOP
+          ------------------------------------------------ */
+
+          for (
+            const record of
+              harvestRecords
+          ) {
+            if (
+              remaining <= 0
+            ) {
+              break;
+            }
+
+            const available =
+              Number(
+                record.remainingQuantity ||
+                  0
+              );
+
+            const take =
+              Math.min(
+                available,
+                remaining
+              );
+
+            const newRemaining =
+              Number(
+                (
+                  available -
+                  take
+                ).toFixed(6)
+              );
+
+            harvestUpdates.push({
+              ref: db
+                .collection(
+                  "harvestRecords"
+                )
+                .doc(record.id),
+
+              remainingQuantity:
+                newRemaining,
+            });
+
+            contributions.push({
+              batchId:
+                currentBatch.id,
+
+              batchNumber:
+                currentBatch.batchNumber,
+
+              harvestRecordId:
+                record.id,
+
+              quantity: take,
+            });
+
+            remaining -=
+              take;
+          }
+
+          /* -----------------------------------------------
+             LEGACY FALLBACK
+          ------------------------------------------------ */
+
+          if (
+            remaining > 0
+          ) {
+            contributions.push({
+              batchId:
+                currentBatch.id,
+
+              batchNumber:
+                currentBatch.batchNumber,
+
+              harvestRecordId:
+                null,
+
+              quantity:
+                remaining,
+            });
+
+            remaining = 0;
+          }
+
+          /* -----------------------------------------------
+             NEW BATCH STOCK
+          ------------------------------------------------ */
+
+          const newStock =
+            Number(
+              (
+                currentStock -
+                quantity
+              ).toFixed(6)
+            );
+
+          const newStatus =
+            newStock <= 0
+              ? "Out of Stock"
+              : "Available";
+
+          plans.push({
+            productId,
+
+            quantity,
+
+            batchRef: db
+              .collection(
+                "productBatches"
+              )
+              .doc(
+                currentBatch.id
+              ),
+
+            newStock,
+
+            newStatus,
+
+            freshness:
+              getFreshnessLabel(
+                currentBatch
+              ),
+
+            harvestUpdates,
+
+            contributions,
+          });
+
+          const primary =
+            contributions[0] ||
+            null;
+
+          updatedProducts.push({
+            ...orderProduct,
+
+            batchId:
+              primary?.batchId ??
+              null,
+
+            batchNumber:
+              primary?.batchNumber ??
+              null,
+
+            harvestRecordId:
+              primary?.harvestRecordId ??
+              null,
+
+            contributions,
+          });
+        }
+
+        /* ---------------------------------------------------
+           WRITES
+        --------------------------------------------------- */
+
+        /* ---------------------------------------------------
+           1. HARVEST RECORDS
+        --------------------------------------------------- */
+
+        for (
+          const plan of plans
+        ) {
+          for (
+            const harvestUpdate of
+              plan.harvestUpdates
+          ) {
+            transaction.update(
+              harvestUpdate.ref,
+              {
+                remainingQuantity:
+                  harvestUpdate.remainingQuantity,
+
+                updatedAt:
+                  FieldValue.serverTimestamp(),
+              }
+            );
+          }
+        }
+
+        /* ---------------------------------------------------
+           2. BATCH STOCK
+        --------------------------------------------------- */
+
+        for (
+          const plan of plans
+        ) {
+          transaction.update(
+            plan.batchRef,
+            {
+              stock:
+                plan.newStock,
+
+              status:
+                plan.newStatus,
+
+              updatedAt:
+                FieldValue.serverTimestamp(),
+            }
+          );
+        }
+
+        /* ---------------------------------------------------
+           3. PRODUCT SALES
+        --------------------------------------------------- */
+
+        for (
+          const plan of plans
+        ) {
+          const productRef =
+            db
+              .collection(
+                "products"
+              )
+              .doc(
+                plan.productId
+              );
+
+          const sellable =
+            plan.newStock > 0 &&
+            plan.newStatus ===
+              "Available";
+
+          transaction.update(
+            productRef,
+            {
+              totalSales:
+                FieldValue.increment(
+                  plan.quantity
+                ),
+
+              weeklySales:
+                FieldValue.increment(
+                  plan.quantity
+                ),
+
+              monthlySales:
+                FieldValue.increment(
+                  plan.quantity
+                ),
+
+              stock:
+                plan.newStock,
+
+              status: sellable
+                ? "Available"
+                : "Out of Stock",
+
+              freshness:
+                plan.freshness,
+
+              updatedAt:
+                FieldValue.serverTimestamp(),
+            }
+          );
+        }
+
+        /* ---------------------------------------------------
+           4. ORDER
+        --------------------------------------------------- */
+
         transaction.update(
-          harvestUpdate.ref,
+          orderRef,
           {
-            remainingQuantity:
-              harvestUpdate.remainingQuantity,
+            paymentStatus:
+              "paid",
+
+            xenditPaymentId:
+              paymentData.payment_id ||
+              null,
+
+            xenditPaymentRequestId:
+              paymentData.payment_request_id ||
+              order.xenditPaymentRequestId ||
+              null,
+
+            xenditReferenceId:
+              paymentData.reference_id ||
+              order.xenditReferenceId ||
+              order.orderNumber ||
+              null,
+
+            xenditPaymentChannel:
+              paymentData.channel_code ||
+              "GCASH",
+
+            xenditPaymentStatus:
+              paymentData.status ||
+              "SUCCEEDED",
+
+            paidAt:
+              FieldValue.serverTimestamp(),
+
+            inventoryFulfilled:
+              true,
+
+            fulfillmentStatus:
+              "fulfilled",
+
+            inventoryFulfilledAt:
+              FieldValue.serverTimestamp(),
+
+            products:
+              updatedProducts,
+
+            xenditWebhookEvent:
+              "payment.capture",
+
+            xenditWebhookReceivedAt:
+              FieldValue.serverTimestamp(),
+
             updatedAt:
               FieldValue.serverTimestamp(),
           }
         );
-      }
-    }
 
-    /* -----------------------------------------------------
-       2. BATCH STOCK
-    ----------------------------------------------------- */
-
-    for (const plan of plans) {
-      transaction.update(
-        plan.batchRef,
-        {
-          stock: plan.newStock,
-          status: plan.newStatus,
-          updatedAt:
-            FieldValue.serverTimestamp(),
-        }
-      );
-    }
-
-    /* -----------------------------------------------------
-       3. PRODUCT SALES
-    ----------------------------------------------------- */
-
-    for (const plan of plans) {
-      const productRef = db
-        .collection("products")
-        .doc(plan.productId);
-
-      const sellable =
-        plan.newStock > 0 &&
-        plan.newStatus === "Available";
-
-      transaction.update(
-        productRef,
-        {
-          totalSales:
-            FieldValue.increment(
-              plan.quantity
-            ),
-          weeklySales:
-            FieldValue.increment(
-              plan.quantity
-            ),
-          monthlySales:
-            FieldValue.increment(
-              plan.quantity
-            ),
-          stock: plan.newStock,
-          status: sellable
-            ? "Available"
-            : "Out of Stock",
-          freshness: plan.freshness,
-          updatedAt:
-            FieldValue.serverTimestamp(),
-        }
-      );
-    }
-
-    /* -----------------------------------------------------
-       4. ORDER
-    ----------------------------------------------------- */
-
-    transaction.update(
-      orderRef,
-      {
-        paymentStatus: "paid",
-
-        xenditPaymentId:
-          paymentData.payment_id ||
-          null,
-
-        xenditPaymentRequestId:
-          paymentData.payment_request_id ||
-          order.xenditPaymentRequestId ||
-          null,
-
-        xenditReferenceId:
-          paymentData.reference_id ||
-          order.xenditReferenceId ||
-          order.orderNumber ||
-          null,
-
-        xenditPaymentChannel:
-          paymentData.channel_code ||
-          "GCASH",
-
-        xenditPaymentStatus:
-          paymentData.status ||
-          "SUCCEEDED",
-
-        paidAt:
-          FieldValue.serverTimestamp(),
-
-        inventoryFulfilled: true,
-
-        fulfillmentStatus:
-          "fulfilled",
-
-        inventoryFulfilledAt:
-          FieldValue.serverTimestamp(),
-
-        products: updatedProducts,
-
-        xenditWebhookEvent:
-          "payment.capture",
-
-        xenditWebhookReceivedAt:
-          FieldValue.serverTimestamp(),
-
-        updatedAt:
-          FieldValue.serverTimestamp(),
+        return {
+          alreadyFulfilled:
+            false,
+        };
       }
     );
-
-    return {
-      alreadyFulfilled: false,
-    };
-  });
-};
+  };
 
 /* =========================================================
    HOME
@@ -1232,12 +1677,27 @@ app.get("/", (req, res) => {
 app.get("/health", (req, res) => {
   res.json({
     success: true,
-    backend: "farmgate-backend",
-    cloudinary: !!getEnv("CLOUD_NAME"),
-    xendit: !!getEnv("XENDIT_SECRET_KEY"),
-    firebase: !!getEnv(
-      "FIREBASE_PROJECT_ID"
-    ),
+
+    backend:
+      "farmgate-backend",
+
+    cloudinary:
+      !!getEnv("CLOUD_NAME"),
+
+    xendit:
+      !!getEnv(
+        "XENDIT_SECRET_KEY"
+      ),
+
+    xenditWebhook:
+      !!getEnv(
+        "XENDIT_WEBHOOK_TOKEN"
+      ),
+
+    firebase:
+      !!getEnv(
+        "FIREBASE_PROJECT_ID"
+      ),
   });
 });
 
@@ -1249,12 +1709,14 @@ app.post(
   "/delete-image",
   async (req, res) => {
     try {
-      const { public_id } = req.body;
+      const { public_id } =
+        req.body;
 
       if (!public_id) {
         return res.status(400).json({
           success: false,
-          error: "Missing public_id.",
+          error:
+            "Missing public_id.",
         });
       }
 
@@ -1275,7 +1737,8 @@ app.post(
 
       return res.status(500).json({
         success: false,
-        error: error.message,
+        error:
+          error.message,
       });
     }
   }
@@ -1289,12 +1752,14 @@ app.post(
   "/create-payment",
   async (req, res) => {
     try {
-      const { orderId } = req.body;
+      const { orderId } =
+        req.body;
 
       if (!orderId) {
         return res.status(400).json({
           success: false,
-          error: "Missing orderId.",
+          error:
+            "Missing orderId.",
         });
       }
 
@@ -1303,15 +1768,18 @@ app.post(
       --------------------------------------------------- */
 
       const decodedUser =
-        await verifyFirebaseUser(req);
+        await verifyFirebaseUser(
+          req
+        );
 
       /* ---------------------------------------------------
          ORDER REFERENCE
       --------------------------------------------------- */
 
-      const orderRef = db
-        .collection("orders")
-        .doc(String(orderId));
+      const orderRef =
+        db
+          .collection("orders")
+          .doc(String(orderId));
 
       const orderSnap =
         await orderRef.get();
@@ -1319,11 +1787,13 @@ app.post(
       if (!orderSnap.exists) {
         return res.status(404).json({
           success: false,
-          error: "Order not found.",
+          error:
+            "Order not found.",
         });
       }
 
-      const order = orderSnap.data();
+      const order =
+        orderSnap.data();
 
       /* ---------------------------------------------------
          BUYER OWNERSHIP
@@ -1344,7 +1814,10 @@ app.post(
          PAYMENT METHOD
       --------------------------------------------------- */
 
-      if (order.payment !== "gcash") {
+      if (
+        order.payment !==
+        "gcash"
+      ) {
         return res.status(400).json({
           success: false,
           error:
@@ -1356,7 +1829,10 @@ app.post(
          CANCELLED
       --------------------------------------------------- */
 
-      if (order.status === "cancelled") {
+      if (
+        order.status ===
+        "cancelled"
+      ) {
         return res.status(400).json({
           success: false,
           error:
@@ -1368,17 +1844,21 @@ app.post(
          ALREADY PAID
       --------------------------------------------------- */
 
-      if (order.paymentStatus === "paid") {
+      if (
+        order.paymentStatus ===
+        "paid"
+      ) {
         return res.json({
           success: true,
           alreadyPaid: true,
           orderId,
-          paymentStatus: "paid",
+          paymentStatus:
+            "paid",
         });
       }
 
       /* ---------------------------------------------------
-         SERVER VALIDATION FIRST
+         SERVER VALIDATION
       --------------------------------------------------- */
 
       const validated =
@@ -1390,11 +1870,14 @@ app.post(
          PUBLIC BASE URL
       --------------------------------------------------- */
 
-      const publicBaseUrl = String(
-        process.env.PUBLIC_BASE_URL || ""
-      )
-        .trim()
-        .replace(/\/+$/, "");
+      const publicBaseUrl =
+        String(
+          process.env
+            .PUBLIC_BASE_URL ||
+            ""
+        )
+          .trim()
+          .replace(/\/+$/, "");
 
       if (!publicBaseUrl) {
         return res.status(500).json({
@@ -1412,7 +1895,8 @@ app.post(
         await orderRef.get();
 
       const latestOrder =
-        latestOrderSnap.data() || {};
+        latestOrderSnap.data() ||
+        {};
 
       if (
         latestOrder.xenditPaymentRequestId
@@ -1433,10 +1917,11 @@ app.post(
               existingPayment.actions
             );
 
-          const reusableStatuses = [
-            "PENDING",
-            "REQUIRES_ACTION",
-          ];
+          const reusableStatuses =
+            [
+              "PENDING",
+              "REQUIRES_ACTION",
+            ];
 
           if (
             redirectUrl &&
@@ -1446,18 +1931,31 @@ app.post(
           ) {
             return res.json({
               success: true,
-              existingPayment: true,
+
+              existingPayment:
+                true,
+
               orderId,
+
               orderNumber:
                 validated.orderNumber ||
                 null,
+
               paymentRequestId:
-                existingPayment.payment_request_id,
+                existingPayment.payment_request_id ||
+                existingPayment.id ||
+                null,
+
               referenceId:
-                existingPayment.reference_id,
+                existingPayment.reference_id ||
+                null,
+
               paymentStatus:
                 existingPayment.status,
-              amount: validated.total,
+
+              amount:
+                validated.total,
+
               redirectUrl,
             });
           }
@@ -1474,7 +1972,10 @@ app.post(
       --------------------------------------------------- */
 
       const referenceId =
-        `${validated.orderNumber || orderId}-${Date.now()}`;
+        `${
+          validated.orderNumber ||
+          orderId
+        }-${Date.now()}`;
 
       /* ---------------------------------------------------
          REDIRECT URLS
@@ -1495,19 +1996,35 @@ app.post(
       --------------------------------------------------- */
 
       const payload = {
-        reference_id: referenceId,
-        type: "PAY",
-        country: "PH",
-        currency: "PHP",
-        request_amount: Number(
-          validated.total.toFixed(2)
-        ),
-        capture_method: "AUTOMATIC",
-        channel_code: "GCASH",
+        reference_id:
+          referenceId,
+
+        type:
+          "PAY",
+
+        country:
+          "PH",
+
+        currency:
+          "PHP",
+
+        request_amount:
+          Number(
+            validated.total.toFixed(
+              2
+            )
+          ),
+
+        capture_method:
+          "AUTOMATIC",
+
+        channel_code:
+          "GCASH",
 
         channel_properties: {
           success_return_url:
             successReturnUrl,
+
           failure_return_url:
             failureReturnUrl,
         },
@@ -1519,13 +2036,19 @@ app.post(
           }`,
 
         metadata: {
-          orderId: String(orderId),
-          orderNumber: String(
-            validated.orderNumber || ""
-          ),
-          buyerId: String(
-            validated.buyerId
-          ),
+          orderId:
+            String(orderId),
+
+          orderNumber:
+            String(
+              validated.orderNumber ||
+                ""
+            ),
+
+          buyerId:
+            String(
+              validated.buyerId
+            ),
         },
       };
 
@@ -1533,8 +2056,11 @@ app.post(
         "CREATING XENDIT PAYMENT:",
         {
           orderId,
+
           referenceId,
-          amount: validated.total,
+
+          amount:
+            validated.total,
         }
       );
 
@@ -1547,9 +2073,11 @@ app.post(
           "/v3/payment_requests",
           {
             method: "POST",
-            body: JSON.stringify(
-              payload
-            ),
+
+            body:
+              JSON.stringify(
+                payload
+              ),
           }
         );
 
@@ -1580,22 +2108,28 @@ app.post(
       --------------------------------------------------- */
 
       await orderRef.update({
-        paymentStatus: "pending",
+        paymentStatus:
+          "pending",
 
         xenditPaymentRequestId:
-          paymentRequest.payment_request_id,
+          paymentRequest.payment_request_id ||
+          paymentRequest.id ||
+          null,
 
         xenditReferenceId:
-          paymentRequest.reference_id,
+          paymentRequest.reference_id ||
+          referenceId,
 
         xenditPaymentChannel:
           paymentRequest.channel_code ||
           "GCASH",
 
         xenditPaymentStatus:
-          paymentRequest.status,
+          paymentRequest.status ||
+          "PENDING",
 
-        inventoryFulfilled: false,
+        inventoryFulfilled:
+          false,
 
         fulfillmentStatus:
           "pending",
@@ -1609,6 +2143,7 @@ app.post(
 
       return res.json({
         success: true,
+
         orderId,
 
         orderNumber:
@@ -1616,13 +2151,17 @@ app.post(
           null,
 
         paymentRequestId:
-          paymentRequest.payment_request_id,
+          paymentRequest.payment_request_id ||
+          paymentRequest.id ||
+          null,
 
         referenceId:
-          paymentRequest.reference_id,
+          paymentRequest.reference_id ||
+          referenceId,
 
         paymentStatus:
-          paymentRequest.status,
+          paymentRequest.status ||
+          "PENDING",
 
         paymentChannel:
           paymentRequest.channel_code ||
@@ -1640,17 +2179,23 @@ app.post(
       );
 
       const statusCode =
-        error.code === "STOCK_UNAVAILABLE"
+        error.code ===
+        "STOCK_UNAVAILABLE"
           ? 409
           : error.status || 500;
 
-      return res.status(statusCode).json({
+      return res.status(
+        statusCode
+      ).json({
         success: false,
+
         error:
           error.message ||
           "Unable to create Xendit payment.",
+
         details:
-          error.response || null,
+          error.response ||
+          null,
       });
     }
   }
@@ -1658,28 +2203,34 @@ app.post(
 
 /* =========================================================
    GET PAYMENT STATUS
+   READ-ONLY
 ========================================================= */
 
 app.get(
   "/payment-status/:orderId",
   async (req, res) => {
     try {
-      const { orderId } = req.params;
+      const {
+        orderId,
+      } = req.params;
 
       /* ---------------------------------------------------
          VERIFY USER
       --------------------------------------------------- */
 
       const decodedUser =
-        await verifyFirebaseUser(req);
+        await verifyFirebaseUser(
+          req
+        );
 
       /* ---------------------------------------------------
          ORDER
       --------------------------------------------------- */
 
-      const orderRef = db
-        .collection("orders")
-        .doc(String(orderId));
+      const orderRef =
+        db
+          .collection("orders")
+          .doc(String(orderId));
 
       const orderSnap =
         await orderRef.get();
@@ -1687,7 +2238,8 @@ app.get(
       if (!orderSnap.exists) {
         return res.status(404).json({
           success: false,
-          error: "Order not found.",
+          error:
+            "Order not found.",
         });
       }
 
@@ -1709,20 +2261,32 @@ app.get(
         });
       }
 
+      /*
+       * IMPORTANT:
+       *
+       * This endpoint DOES NOT call Xendit.
+       * It ONLY reads FarmGate's Firestore state.
+       *
+       * Xendit -> webhook -> Firestore
+       * App -> this endpoint -> Firestore
+       */
+
       return res.json({
         success: true,
+
         orderId,
 
         payment:
-          order.payment,
+          order.payment ||
+          null,
 
         paymentStatus:
           order.paymentStatus ||
           "pending",
 
         inventoryFulfilled:
-          order.inventoryFulfilled ||
-          false,
+          order.inventoryFulfilled ===
+          true,
 
         fulfillmentStatus:
           order.fulfillmentStatus ||
@@ -1739,6 +2303,54 @@ app.get(
         xenditReferenceId:
           order.xenditReferenceId ||
           null,
+
+        xenditPaymentChannel:
+          order.xenditPaymentChannel ||
+          null,
+
+        xenditPaymentStatus:
+          order.xenditPaymentStatus ||
+          null,
+
+        paymentFailureCode:
+          order.paymentFailureCode ||
+          null,
+
+        paymentFailureReason:
+          order.paymentFailureReason ||
+          null,
+
+        paymentRequestCreatedAt:
+          order.paymentRequestCreatedAt ||
+          null,
+
+        paidAt:
+          order.paidAt ||
+          null,
+
+        serverValidated:
+          order.serverValidated ===
+          true,
+
+        serverValidatedAt:
+          order.serverValidatedAt ||
+          null,
+
+        xenditWebhookEvent:
+          order.xenditWebhookEvent ||
+          null,
+
+        xenditWebhookReceivedAt:
+          order.xenditWebhookReceivedAt ||
+          null,
+
+        fulfillmentError:
+          order.fulfillmentError ||
+          null,
+
+        updatedAt:
+          order.updatedAt ||
+          null,
       });
     } catch (error) {
       console.error(
@@ -1748,6 +2360,7 @@ app.get(
 
       return res.status(500).json({
         success: false,
+
         error:
           error.message ||
           "Unable to get payment status.",
@@ -1769,10 +2382,14 @@ app.post(
       --------------------------------------------------- */
 
       const callbackToken =
-        req.headers["x-callback-token"];
+        req.headers[
+          "x-callback-token"
+        ];
 
       const webhookToken =
-        getEnv("XENDIT_WEBHOOK_TOKEN");
+        getEnv(
+          "XENDIT_WEBHOOK_TOKEN"
+        );
 
       if (!webhookToken) {
         console.error(
@@ -1788,8 +2405,13 @@ app.post(
 
       if (
         !callbackToken ||
-        typeof callbackToken !== "string"
+        typeof callbackToken !==
+          "string"
       ) {
+        console.error(
+          "Missing Xendit callback token."
+        );
+
         return res.status(401).json({
           success: false,
           error:
@@ -1818,24 +2440,57 @@ app.post(
          PAYLOAD
       --------------------------------------------------- */
 
-      const event = req.body?.event;
-      const data = req.body?.data || {};
+      const event =
+        req.body?.event;
+
+      const data =
+        req.body?.data || {};
 
       console.log(
-        "XENDIT WEBHOOK RECEIVED:",
-        {
-          event,
-          paymentId:
-            data.payment_id,
-          paymentRequestId:
-            data.payment_request_id,
-          referenceId:
-            data.reference_id,
-          channelCode:
-            data.channel_code,
-          status:
-            data.status,
-        }
+        "========================================"
+      );
+
+      console.log(
+        "XENDIT WEBHOOK RECEIVED"
+      );
+
+      console.log(
+        "Event:",
+        event
+      );
+
+      console.log(
+        "Payment ID:",
+        data.payment_id
+      );
+
+      console.log(
+        "Payment Request ID:",
+        data.payment_request_id
+      );
+
+      console.log(
+        "Reference ID:",
+        data.reference_id
+      );
+
+      console.log(
+        "Channel:",
+        data.channel_code
+      );
+
+      console.log(
+        "Status:",
+        data.status
+      );
+
+      console.log(
+        "Request Amount:",
+        data.request_amount
+      );
+
+      console.log(
+        "========================================"
       );
 
       /* ---------------------------------------------------
@@ -1892,9 +2547,10 @@ app.post(
           });
         }
 
-        const orderRef = db
-          .collection("orders")
-          .doc(orderSnap.id);
+        const orderRef =
+          db
+            .collection("orders")
+            .doc(orderSnap.id);
 
         await orderRef.update({
           paymentStatus:
@@ -1922,16 +2578,28 @@ app.post(
 
           paymentFailureCode:
             data.failure_code ||
+            data.error_code ||
             null,
 
           paymentFailureReason:
             data.failure_reason ||
+            data.failure_message ||
+            data.message ||
             null,
 
           fulfillmentStatus:
             "pending",
 
+          inventoryFulfilled:
+            false,
+
           updatedAt:
+            FieldValue.serverTimestamp(),
+
+          xenditWebhookEvent:
+            "payment.failure",
+
+          xenditWebhookReceivedAt:
             FieldValue.serverTimestamp(),
         });
 
@@ -1947,13 +2615,18 @@ app.post(
       }
 
       /* ---------------------------------------------------
-         ONLY payment.capture FULFILLS
+         ONLY PAYMENT.CAPTURE FULFILLS
       --------------------------------------------------- */
 
       if (
         event !==
         "payment.capture"
       ) {
+        console.log(
+          "Webhook acknowledged; no fulfillment required:",
+          event
+        );
+
         return res.status(200).json({
           success: true,
           message:
@@ -1962,23 +2635,22 @@ app.post(
       }
 
       /* ---------------------------------------------------
-         STATUS CHECK
+         STRICT SUCCESS CHECK
       --------------------------------------------------- */
 
       if (
-        data.status &&
         data.status !==
-          "SUCCEEDED"
+        "SUCCEEDED"
       ) {
         console.error(
-          "Unexpected payment.capture status:",
+          "Payment capture is not successful:",
           data.status
         );
 
-        return res.status(400).json({
-          success: false,
-          error:
-            "Unexpected payment status.",
+        return res.status(200).json({
+          success: true,
+          message:
+            "Payment capture received but payment is not successful.",
         });
       }
 
@@ -2018,8 +2690,10 @@ app.post(
           {
             paymentId:
               data.payment_id,
+
             paymentRequestId:
               data.payment_request_id,
+
             referenceId:
               data.reference_id,
           }
@@ -2032,9 +2706,10 @@ app.post(
         });
       }
 
-      const orderRef = db
-        .collection("orders")
-        .doc(orderSnap.id);
+      const orderRef =
+        db
+          .collection("orders")
+          .doc(orderSnap.id);
 
       const order =
         orderSnap.data();
@@ -2088,15 +2763,25 @@ app.post(
       const orderTotal =
         Number(order.total);
 
-      const capturedAmount = Number(
-        data.captures?.[0]
-          ?.capture_amount ??
-          data.request_amount
-      );
+      const capturedAmount =
+        Number(
+          data.captures?.find(
+            (capture) =>
+              capture?.status ===
+              "SUCCEEDED"
+          )?.capture_amount ??
+            data.captures?.[0]
+              ?.capture_amount ??
+            data.request_amount
+        );
 
       if (
-        !Number.isFinite(orderTotal) ||
-        !Number.isFinite(capturedAmount)
+        !Number.isFinite(
+          orderTotal
+        ) ||
+        !Number.isFinite(
+          capturedAmount
+        )
       ) {
         console.error(
           "INVALID PAYMENT AMOUNT."
@@ -2123,23 +2808,14 @@ app.post(
           }
         );
 
-        return res.status(400).json({
-          success: false,
-          error:
-            "Payment amount does not match order total.",
-        });
-      }
+        /*
+         * Payment actually succeeded,
+         * but amount is unsafe to auto-fulfill.
+         */
 
-      /* ---------------------------------------------------
-         CANCELLED ORDER
-      --------------------------------------------------- */
-
-      if (
-        order.status ===
-        "cancelled"
-      ) {
         await orderRef.update({
-          paymentStatus: "paid",
+          paymentStatus:
+            "paid",
 
           xenditPaymentId:
             data.payment_id ||
@@ -2164,7 +2840,69 @@ app.post(
           paidAt:
             FieldValue.serverTimestamp(),
 
-          inventoryFulfilled: false,
+          inventoryFulfilled:
+            false,
+
+          fulfillmentStatus:
+            "manual_review",
+
+          fulfillmentError:
+            "Payment amount does not match the order total.",
+
+          xenditWebhookEvent:
+            "payment.capture",
+
+          xenditWebhookReceivedAt:
+            FieldValue.serverTimestamp(),
+
+          updatedAt:
+            FieldValue.serverTimestamp(),
+        });
+
+        return res.status(200).json({
+          success: true,
+          message:
+            "Payment received but amount mismatch requires manual review.",
+        });
+      }
+
+      /* ---------------------------------------------------
+         CANCELLED ORDER
+      --------------------------------------------------- */
+
+      if (
+        order.status ===
+        "cancelled"
+      ) {
+        await orderRef.update({
+          paymentStatus:
+            "paid",
+
+          xenditPaymentId:
+            data.payment_id ||
+            null,
+
+          xenditPaymentRequestId:
+            data.payment_request_id ||
+            null,
+
+          xenditReferenceId:
+            data.reference_id ||
+            null,
+
+          xenditPaymentChannel:
+            data.channel_code ||
+            "GCASH",
+
+          xenditPaymentStatus:
+            data.status ||
+            "SUCCEEDED",
+
+          paidAt:
+            FieldValue.serverTimestamp(),
+
+          inventoryFulfilled:
+            false,
 
           fulfillmentStatus:
             "manual_review",
@@ -2194,6 +2932,33 @@ app.post(
       }
 
       /* ---------------------------------------------------
+         IDEMPOTENCY QUICK CHECK
+      --------------------------------------------------- */
+
+      if (
+        order.inventoryFulfilled ===
+          true &&
+        order.paymentStatus ===
+          "paid"
+      ) {
+        console.log(
+          `Order ${orderSnap.id} already fulfilled.`
+        );
+
+        return res.status(200).json({
+          success: true,
+          message:
+            "Order already fulfilled.",
+          orderId:
+            orderSnap.id,
+          inventoryFulfilled:
+            true,
+          alreadyFulfilled:
+            true,
+        });
+      }
+
+      /* ---------------------------------------------------
          SERVER-SIDE FIFO FULFILLMENT
       --------------------------------------------------- */
 
@@ -2205,6 +2970,10 @@ app.post(
           );
 
         console.log(
+          "========================================"
+        );
+
+        console.log(
           "PAYMENT + FULFILLMENT COMPLETE:",
           {
             orderId:
@@ -2213,6 +2982,10 @@ app.post(
             alreadyFulfilled:
               result.alreadyFulfilled,
           }
+        );
+
+        console.log(
+          "========================================"
         );
 
         return res.status(200).json({
@@ -2226,7 +2999,8 @@ app.post(
           orderId:
             orderSnap.id,
 
-          inventoryFulfilled: true,
+          inventoryFulfilled:
+            true,
 
           alreadyFulfilled:
             result.alreadyFulfilled,
@@ -2243,7 +3017,8 @@ app.post(
           "STOCK_UNAVAILABLE"
         ) {
           await orderRef.update({
-            paymentStatus: "paid",
+            paymentStatus:
+              "paid",
 
             xenditPaymentId:
               data.payment_id ||
@@ -2268,7 +3043,8 @@ app.post(
             paidAt:
               FieldValue.serverTimestamp(),
 
-            inventoryFulfilled: false,
+            inventoryFulfilled:
+              false,
 
             fulfillmentStatus:
               "stock_unavailable",
@@ -2291,10 +3067,19 @@ app.post(
             fulfillmentError.message
           );
 
+          /*
+           * IMPORTANT:
+           * Payment succeeded, so we acknowledge
+           * the webhook. Order is flagged for
+           * manual resolution.
+           */
+
           return res.status(200).json({
             success: true,
+
             message:
               "Payment received but inventory requires manual review.",
+
             orderId:
               orderSnap.id,
           });
@@ -2310,6 +3095,7 @@ app.post(
 
       return res.status(500).json({
         success: false,
+
         error:
           error.message ||
           "Webhook processing failed.",
@@ -2325,21 +3111,26 @@ app.post(
 app.get(
   "/payment/success",
   (req, res) => {
-    const orderId = String(
-      req.query.orderId || ""
-    );
+    const orderId =
+      String(
+        req.query.orderId ||
+          ""
+      );
 
     res.status(200).send(`
 <!DOCTYPE html>
 <html>
 <head>
   <meta charset="UTF-8" />
+
   <meta
     name="viewport"
     content="width=device-width, initial-scale=1.0"
   />
+
   <title>FarmGate Payment</title>
 </head>
+
 <body
   style="
     font-family: Arial, sans-serif;
@@ -2378,21 +3169,26 @@ app.get(
 app.get(
   "/payment/failure",
   (req, res) => {
-    const orderId = String(
-      req.query.orderId || ""
-    );
+    const orderId =
+      String(
+        req.query.orderId ||
+          ""
+      );
 
     res.status(200).send(`
 <!DOCTYPE html>
 <html>
 <head>
   <meta charset="UTF-8" />
+
   <meta
     name="viewport"
     content="width=device-width, initial-scale=1.0"
   />
+
   <title>FarmGate Payment Failed</title>
 </head>
+
 <body
   style="
     font-family: Arial, sans-serif;
@@ -2424,20 +3220,31 @@ app.get(
    404
 ========================================================= */
 
-app.use((req, res) => {
-  res.status(404).json({
-    success: false,
-    error: "Route not found.",
-    path: req.originalUrl,
-  });
-});
+app.use(
+  (req, res) => {
+    res.status(404).json({
+      success: false,
+
+      error:
+        "Route not found.",
+
+      path:
+        req.originalUrl,
+    });
+  }
+);
 
 /* =========================================================
    GLOBAL ERROR HANDLER
 ========================================================= */
 
 app.use(
-  (error, req, res, next) => {
+  (
+    error,
+    req,
+    res,
+    next
+  ) => {
     console.error(
       "GLOBAL ERROR:",
       error
@@ -2449,6 +3256,7 @@ app.use(
 
     return res.status(500).json({
       success: false,
+
       error:
         error.message ||
         "Internal server error.",
@@ -2460,10 +3268,62 @@ app.use(
    START SERVER
 ========================================================= */
 
-const PORT = process.env.PORT || 5000;
+const PORT =
+  process.env.PORT || 5000;
 
-app.listen(PORT, () => {
-  console.log(
-    `FarmGate Backend running on port ${PORT}`
-  );
-});
+app.listen(
+  PORT,
+  "0.0.0.0",
+  () => {
+    console.log(
+      "========================================"
+    );
+
+    console.log(
+      `FarmGate Backend running on port ${PORT}`
+    );
+
+    console.log(
+      `Cloudinary configured: ${
+        !!getEnv("CLOUD_NAME")
+      }`
+    );
+
+    console.log(
+      `Firebase configured: ${
+        !!getEnv(
+          "FIREBASE_PROJECT_ID"
+        )
+      }`
+    );
+
+    console.log(
+      `Xendit configured: ${
+        !!getEnv(
+          "XENDIT_SECRET_KEY"
+        )
+      }`
+    );
+
+    console.log(
+      `Xendit webhook configured: ${
+        !!getEnv(
+          "XENDIT_WEBHOOK_TOKEN"
+        )
+      }`
+    );
+
+    console.log(
+      `PUBLIC_BASE_URL: ${
+        getEnv(
+          "PUBLIC_BASE_URL"
+        ) ||
+        "NOT SET"
+      }`
+    );
+
+    console.log(
+      "========================================"
+    );
+  }
+);
