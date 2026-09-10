@@ -382,30 +382,53 @@ const getFreshnessLabel = (
    GET CURRENT BATCH
 ========================================================= */
 
+const getAvailableBatches = (
+  snapshot
+) => {
+  return snapshot.docs
+    .map((docSnap) => ({
+      id: docSnap.id,
+      ...docSnap.data(),
+    }))
+    .filter((batch) => {
+      const stock = Number(
+        batch.stock || 0
+      );
+
+      return (
+        batch.archived !== true &&
+        batch.status === "Available" &&
+        Number.isFinite(stock) &&
+        stock > 0
+      );
+    })
+    .sort(
+      (first, second) =>
+        Number(
+          second.batchNumber || 0
+        ) -
+        Number(
+          first.batchNumber || 0
+        )
+    );
+};
+
+const getAvailableStockFromBatches = (
+  batches
+) => {
+  return batches.reduce(
+    (total, batch) =>
+      total + Number(batch.stock || 0),
+    0
+  );
+};
+
 const getCurrentBatch = (
   snapshot
 ) => {
-  const batches =
-    snapshot.docs
-      .map((docSnap) => ({
-        id: docSnap.id,
-        ...docSnap.data(),
-      }))
-      .filter(
-        (batch) =>
-          batch.archived !== true
-      )
-      .sort(
-        (first, second) =>
-          Number(
-            second.batchNumber || 0
-          ) -
-          Number(
-            first.batchNumber || 0
-          )
-      );
-
-  return batches[0] || null;
+  return getAvailableBatches(
+    snapshot
+  )[0] || null;
 };
 
 /* =========================================================
@@ -757,32 +780,18 @@ const validateOrderForPayment =
               batchQuery
             );
 
-          const currentBatch =
-            getCurrentBatch(
+          const availableBatches =
+            getAvailableBatches(
               batchSnapshot
             );
 
-          if (!currentBatch) {
-            throw new StockFulfillmentError(
-              `No current batch found for ${
-                product.name ||
-                productId
-              }.`
-            );
-          }
-
-          const currentStock =
-            Number(
-              currentBatch.stock
+          const availableStock =
+            getAvailableStockFromBatches(
+              availableBatches
             );
 
           if (
-            currentBatch.status !==
-              "Available" ||
-            !Number.isFinite(
-              currentStock
-            ) ||
-            currentStock <= 0
+            availableBatches.length === 0
           ) {
             throw new StockFulfillmentError(
               `${
@@ -793,14 +802,14 @@ const validateOrderForPayment =
           }
 
           if (
-            currentStock <
+            availableStock <
             quantity
           ) {
             throw new StockFulfillmentError(
               `Insufficient stock for ${
                 product.name ||
                 productId
-              }. Available: ${currentStock}, Requested: ${quantity}.`
+              }. Available: ${availableStock}, Requested: ${quantity}.`
             );
           }
 
@@ -1221,7 +1230,7 @@ const fulfillPaidOrder =
           }
 
           /* -----------------------------------------------
-             BATCHES
+             AVAILABLE BATCHES
           ------------------------------------------------ */
 
           const batchQuery =
@@ -1240,32 +1249,18 @@ const fulfillPaidOrder =
               batchQuery
             );
 
-          const currentBatch =
-            getCurrentBatch(
+          const availableBatches =
+            getAvailableBatches(
               batchSnapshot
             );
 
-          if (!currentBatch) {
-            throw new StockFulfillmentError(
-              `No current batch found for ${
-                product.name ||
-                productId
-              }.`
-            );
-          }
-
-          const currentStock =
-            Number(
-              currentBatch.stock
+          const availableStock =
+            getAvailableStockFromBatches(
+              availableBatches
             );
 
           if (
-            currentBatch.status !==
-              "Available" ||
-            !Number.isFinite(
-              currentStock
-            ) ||
-            currentStock <= 0
+            availableBatches.length === 0
           ) {
             throw new StockFulfillmentError(
               `${
@@ -1276,204 +1271,189 @@ const fulfillPaidOrder =
           }
 
           if (
-            currentStock <
+            availableStock <
             quantity
           ) {
             throw new StockFulfillmentError(
               `Insufficient stock for ${
                 product.name ||
                 productId
-              }. Available: ${currentStock}, Requested: ${quantity}.`
+              }. Available: ${availableStock}, Requested: ${quantity}.`
             );
           }
 
-          /* -----------------------------------------------
-             HARVEST RECORDS
-          ------------------------------------------------ */
-
-          const harvestQuery =
-            db
-              .collection(
-                "harvestRecords"
-              )
-              .where(
-                "batchId",
-                "==",
-                currentBatch.id
-              );
-
-          const harvestSnapshot =
-            await transaction.get(
-              harvestQuery
-            );
+          const contributions = [];
+          const plansForProduct = [];
+          let remaining = quantity;
 
           /* -----------------------------------------------
-             FIFO
-          ------------------------------------------------ */
-
-          const harvestRecords =
-            harvestSnapshot.docs
-              .map(
-                (harvestDoc) => ({
-                  id: harvestDoc.id,
-                  ...harvestDoc.data(),
-                })
-              )
-              .sort(
-                (first, second) =>
-                  toMillis(
-                    first.harvestDate
-                  ) -
-                  toMillis(
-                    second.harvestDate
-                  )
-              )
-              .filter(
-                (record) =>
-                  Number(
-                    record.remainingQuantity ||
-                      0
-                  ) > 0
-              );
-
-          const contributions =
-            [];
-
-          const harvestUpdates =
-            [];
-
-          let remaining =
-            quantity;
-
-          /* -----------------------------------------------
-             FIFO LOOP
+             CONSUME ELIGIBLE BATCHES
+             Only non-archived + Available + stock > 0.
+             Newest batch first.
           ------------------------------------------------ */
 
           for (
-            const record of
-              harvestRecords
+            const currentBatch of
+              availableBatches
           ) {
-            if (
-              remaining <= 0
-            ) {
+            if (remaining <= 0) {
               break;
             }
 
-            const available =
-              Number(
+            const currentStock = Number(
+              currentBatch.stock || 0
+            );
+
+            const batchQuantity = Math.min(
+              currentStock,
+              remaining
+            );
+
+            if (batchQuantity <= 0) {
+              continue;
+            }
+
+            const harvestQuery =
+              db
+                .collection(
+                  "harvestRecords"
+                )
+                .where(
+                  "batchId",
+                  "==",
+                  currentBatch.id
+                );
+
+            const harvestSnapshot =
+              await transaction.get(
+                harvestQuery
+              );
+
+            const harvestRecords =
+              harvestSnapshot.docs
+                .map(
+                  (harvestDoc) => ({
+                    id: harvestDoc.id,
+                    ...harvestDoc.data(),
+                  })
+                )
+                .sort(
+                  (first, second) =>
+                    toMillis(
+                      first.harvestDate
+                    ) -
+                    toMillis(
+                      second.harvestDate
+                    )
+                )
+                .filter(
+                  (record) =>
+                    Number(
+                      record.remainingQuantity ||
+                        0
+                    ) > 0
+                );
+
+            const harvestUpdates = [];
+            let remainingInBatch =
+              batchQuantity;
+
+            for (
+              const record of
+                harvestRecords
+            ) {
+              if (remainingInBatch <= 0) {
+                break;
+              }
+
+              const available = Number(
                 record.remainingQuantity ||
                   0
               );
 
-            const take =
-              Math.min(
+              const take = Math.min(
                 available,
-                remaining
+                remainingInBatch
               );
 
-            const newRemaining =
-              Number(
-                (
-                  available -
-                  take
-                ).toFixed(6)
+              const newRemaining = Number(
+                (available - take).toFixed(6)
               );
 
-            harvestUpdates.push({
-              ref: db
-                .collection(
-                  "harvestRecords"
-                )
-                .doc(record.id),
+              harvestUpdates.push({
+                ref: db
+                  .collection(
+                    "harvestRecords"
+                  )
+                  .doc(record.id),
+                remainingQuantity:
+                  newRemaining,
+              });
 
-              remainingQuantity:
-                newRemaining,
-            });
+              contributions.push({
+                batchId:
+                  currentBatch.id,
+                batchNumber:
+                  currentBatch.batchNumber,
+                harvestRecordId:
+                  record.id,
+                quantity: take,
+              });
 
-            contributions.push({
-              batchId:
-                currentBatch.id,
+              remainingInBatch -= take;
+            }
 
-              batchNumber:
-                currentBatch.batchNumber,
+            if (remainingInBatch > 0) {
+              contributions.push({
+                batchId:
+                  currentBatch.id,
+                batchNumber:
+                  currentBatch.batchNumber,
+                harvestRecordId: null,
+                quantity:
+                  remainingInBatch,
+              });
+            }
 
-              harvestRecordId:
-                record.id,
-
-              quantity: take,
-            });
-
-            remaining -=
-              take;
-          }
-
-          /* -----------------------------------------------
-             LEGACY FALLBACK
-          ------------------------------------------------ */
-
-          if (
-            remaining > 0
-          ) {
-            contributions.push({
-              batchId:
-                currentBatch.id,
-
-              batchNumber:
-                currentBatch.batchNumber,
-
-              harvestRecordId:
-                null,
-
-              quantity:
-                remaining,
-            });
-
-            remaining = 0;
-          }
-
-          /* -----------------------------------------------
-             NEW BATCH STOCK
-          ------------------------------------------------ */
-
-          const newStock =
-            Number(
-              (
-                currentStock -
-                quantity
-              ).toFixed(6)
+            const newStock = Number(
+              (currentStock - batchQuantity).toFixed(6)
             );
 
-          const newStatus =
-            newStock <= 0
-              ? "Out of Stock"
-              : "Available";
+            const newStatus =
+              newStock <= 0
+                ? "Out of Stock"
+                : "Available";
 
-          plans.push({
-            productId,
+            plansForProduct.push({
+              productId,
+              quantity: batchQuantity,
+              batchRef: db
+                .collection(
+                  "productBatches"
+                )
+                .doc(currentBatch.id),
+              newStock,
+              newStatus,
+              freshness:
+                getFreshnessLabel(
+                  currentBatch
+                ),
+              harvestUpdates,
+            });
 
-            quantity,
+            remaining -= batchQuantity;
+          }
 
-            batchRef: db
-              .collection(
-                "productBatches"
-              )
-              .doc(
-                currentBatch.id
-              ),
+          if (remaining > 0) {
+            throw new StockFulfillmentError(
+              `Insufficient stock for ${
+                product.name ||
+                productId
+              }. Available: ${availableStock}, Requested: ${quantity}.`
+            );
+          }
 
-            newStock,
-
-            newStatus,
-
-            freshness:
-              getFreshnessLabel(
-                currentBatch
-              ),
-
-            harvestUpdates,
-
-            contributions,
-          });
+          plans.push(...plansForProduct);
 
           const primary =
             contributions[0] ||
