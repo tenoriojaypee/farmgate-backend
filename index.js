@@ -2,11 +2,12 @@ const express = require("express");
 const cors = require("cors");
 const cloudinary = require("cloudinary").v2;
 const crypto = require("crypto");
+require("dotenv").config();
+
 const {
   createWalletRouter,
   handleCommissionDepositWebhook,
 } = require("./walletRoutes");
-require("dotenv").config();
 
 const {
   initializeApp,
@@ -47,6 +48,19 @@ const getEnv = (name) => {
   }
 
   return value.trim();
+};
+
+const roundMoney = (value) =>
+  Number(Number(value || 0).toFixed(2));
+
+const getCommissionRate = () => {
+  const configured = Number(
+    getEnv("FARMGATE_COMMISSION_RATE") || 0.03
+  );
+
+  return Number.isFinite(configured) && configured >= 0
+    ? configured
+    : 0.03;
 };
 
 /* =========================================================
@@ -94,7 +108,7 @@ const db = getFirestore(firebaseApp);
 const auth = getAuth(firebaseApp);
 
 /* =========================================================
-   FARMER WALLET / COMMISSION RESERVE ROUTES
+   FARMER WALLET / PAYOUT ROUTES
 ========================================================= */
 
 app.use(
@@ -102,6 +116,7 @@ app.use(
   createWalletRouter({
     db,
     auth,
+    getEnv,
   })
 );
 
@@ -398,53 +413,30 @@ const getFreshnessLabel = (
    GET CURRENT BATCH
 ========================================================= */
 
-const getAvailableBatches = (
-  snapshot
-) => {
-  return snapshot.docs
-    .map((docSnap) => ({
-      id: docSnap.id,
-      ...docSnap.data(),
-    }))
-    .filter((batch) => {
-      const stock = Number(
-        batch.stock || 0
-      );
-
-      return (
-        batch.archived !== true &&
-        batch.status === "Available" &&
-        Number.isFinite(stock) &&
-        stock > 0
-      );
-    })
-    .sort(
-      (first, second) =>
-        Number(
-          second.batchNumber || 0
-        ) -
-        Number(
-          first.batchNumber || 0
-        )
-    );
-};
-
-const getAvailableStockFromBatches = (
-  batches
-) => {
-  return batches.reduce(
-    (total, batch) =>
-      total + Number(batch.stock || 0),
-    0
-  );
-};
-
 const getCurrentBatch = (
   snapshot
 ) => {
-  return getAvailableBatches(
-    snapshot
-  )[0] || null;
+  const batches =
+    snapshot.docs
+      .map((docSnap) => ({
+        id: docSnap.id,
+        ...docSnap.data(),
+      }))
+      .filter(
+        (batch) =>
+          batch.archived !== true
+      )
+      .sort(
+        (first, second) =>
+          Number(
+            second.batchNumber || 0
+          ) -
+          Number(
+            first.batchNumber || 0
+          )
+      );
+
+  return batches[0] || null;
 };
 
 /* =========================================================
@@ -595,18 +587,6 @@ const validateOrderForPayment =
         ) {
           throw new Error(
             "This order has already been cancelled."
-          );
-        }
-
-        /* ---------------------------------------------------
-           FARMER ACCEPTANCE REQUIRED
-        --------------------------------------------------- */
-        if (
-          order.status !==
-          "accepted"
-        ) {
-          throw new Error(
-            "The farmer must accept the order before GCash payment."
           );
         }
 
@@ -796,18 +776,32 @@ const validateOrderForPayment =
               batchQuery
             );
 
-          const availableBatches =
-            getAvailableBatches(
+          const currentBatch =
+            getCurrentBatch(
               batchSnapshot
             );
 
-          const availableStock =
-            getAvailableStockFromBatches(
-              availableBatches
+          if (!currentBatch) {
+            throw new StockFulfillmentError(
+              `No current batch found for ${
+                product.name ||
+                productId
+              }.`
+            );
+          }
+
+          const currentStock =
+            Number(
+              currentBatch.stock
             );
 
           if (
-            availableBatches.length === 0
+            currentBatch.status !==
+              "Available" ||
+            !Number.isFinite(
+              currentStock
+            ) ||
+            currentStock <= 0
           ) {
             throw new StockFulfillmentError(
               `${
@@ -818,14 +812,14 @@ const validateOrderForPayment =
           }
 
           if (
-            availableStock <
+            currentStock <
             quantity
           ) {
             throw new StockFulfillmentError(
               `Insufficient stock for ${
                 product.name ||
                 productId
-              }. Available: ${availableStock}, Requested: ${quantity}.`
+              }. Available: ${currentStock}, Requested: ${quantity}.`
             );
           }
 
@@ -1031,6 +1025,20 @@ const fulfillPaidOrder =
 
         const order =
           orderSnap.data();
+
+        const farmerWalletRef = db
+          .collection("farmerWallets")
+          .doc(String(order.farmerId || ""));
+
+        const farmerWalletSnap =
+          await transaction.get(
+            farmerWalletRef
+          );
+
+        const farmerWalletData =
+          farmerWalletSnap.exists
+            ? farmerWalletSnap.data() || {}
+            : {};
 
         /* ---------------------------------------------------
            IDEMPOTENCY
@@ -1246,7 +1254,7 @@ const fulfillPaidOrder =
           }
 
           /* -----------------------------------------------
-             AVAILABLE BATCHES
+             BATCHES
           ------------------------------------------------ */
 
           const batchQuery =
@@ -1265,18 +1273,32 @@ const fulfillPaidOrder =
               batchQuery
             );
 
-          const availableBatches =
-            getAvailableBatches(
+          const currentBatch =
+            getCurrentBatch(
               batchSnapshot
             );
 
-          const availableStock =
-            getAvailableStockFromBatches(
-              availableBatches
+          if (!currentBatch) {
+            throw new StockFulfillmentError(
+              `No current batch found for ${
+                product.name ||
+                productId
+              }.`
+            );
+          }
+
+          const currentStock =
+            Number(
+              currentBatch.stock
             );
 
           if (
-            availableBatches.length === 0
+            currentBatch.status !==
+              "Available" ||
+            !Number.isFinite(
+              currentStock
+            ) ||
+            currentStock <= 0
           ) {
             throw new StockFulfillmentError(
               `${
@@ -1287,189 +1309,204 @@ const fulfillPaidOrder =
           }
 
           if (
-            availableStock <
+            currentStock <
             quantity
           ) {
             throw new StockFulfillmentError(
               `Insufficient stock for ${
                 product.name ||
                 productId
-              }. Available: ${availableStock}, Requested: ${quantity}.`
+              }. Available: ${currentStock}, Requested: ${quantity}.`
             );
           }
 
-          const contributions = [];
-          const plansForProduct = [];
-          let remaining = quantity;
+          /* -----------------------------------------------
+             HARVEST RECORDS
+          ------------------------------------------------ */
+
+          const harvestQuery =
+            db
+              .collection(
+                "harvestRecords"
+              )
+              .where(
+                "batchId",
+                "==",
+                currentBatch.id
+              );
+
+          const harvestSnapshot =
+            await transaction.get(
+              harvestQuery
+            );
 
           /* -----------------------------------------------
-             CONSUME ELIGIBLE BATCHES
-             Only non-archived + Available + stock > 0.
-             Newest batch first.
+             FIFO
+          ------------------------------------------------ */
+
+          const harvestRecords =
+            harvestSnapshot.docs
+              .map(
+                (harvestDoc) => ({
+                  id: harvestDoc.id,
+                  ...harvestDoc.data(),
+                })
+              )
+              .sort(
+                (first, second) =>
+                  toMillis(
+                    first.harvestDate
+                  ) -
+                  toMillis(
+                    second.harvestDate
+                  )
+              )
+              .filter(
+                (record) =>
+                  Number(
+                    record.remainingQuantity ||
+                      0
+                  ) > 0
+              );
+
+          const contributions =
+            [];
+
+          const harvestUpdates =
+            [];
+
+          let remaining =
+            quantity;
+
+          /* -----------------------------------------------
+             FIFO LOOP
           ------------------------------------------------ */
 
           for (
-            const currentBatch of
-              availableBatches
+            const record of
+              harvestRecords
           ) {
-            if (remaining <= 0) {
+            if (
+              remaining <= 0
+            ) {
               break;
             }
 
-            const currentStock = Number(
-              currentBatch.stock || 0
-            );
-
-            const batchQuantity = Math.min(
-              currentStock,
-              remaining
-            );
-
-            if (batchQuantity <= 0) {
-              continue;
-            }
-
-            const harvestQuery =
-              db
-                .collection(
-                  "harvestRecords"
-                )
-                .where(
-                  "batchId",
-                  "==",
-                  currentBatch.id
-                );
-
-            const harvestSnapshot =
-              await transaction.get(
-                harvestQuery
-              );
-
-            const harvestRecords =
-              harvestSnapshot.docs
-                .map(
-                  (harvestDoc) => ({
-                    id: harvestDoc.id,
-                    ...harvestDoc.data(),
-                  })
-                )
-                .sort(
-                  (first, second) =>
-                    toMillis(
-                      first.harvestDate
-                    ) -
-                    toMillis(
-                      second.harvestDate
-                    )
-                )
-                .filter(
-                  (record) =>
-                    Number(
-                      record.remainingQuantity ||
-                        0
-                    ) > 0
-                );
-
-            const harvestUpdates = [];
-            let remainingInBatch =
-              batchQuantity;
-
-            for (
-              const record of
-                harvestRecords
-            ) {
-              if (remainingInBatch <= 0) {
-                break;
-              }
-
-              const available = Number(
+            const available =
+              Number(
                 record.remainingQuantity ||
                   0
               );
 
-              const take = Math.min(
+            const take =
+              Math.min(
                 available,
-                remainingInBatch
+                remaining
               );
 
-              const newRemaining = Number(
-                (available - take).toFixed(6)
+            const newRemaining =
+              Number(
+                (
+                  available -
+                  take
+                ).toFixed(6)
               );
 
-              harvestUpdates.push({
-                ref: db
-                  .collection(
-                    "harvestRecords"
-                  )
-                  .doc(record.id),
-                remainingQuantity:
-                  newRemaining,
-              });
-
-              contributions.push({
-                batchId:
-                  currentBatch.id,
-                batchNumber:
-                  currentBatch.batchNumber,
-                harvestRecordId:
-                  record.id,
-                quantity: take,
-              });
-
-              remainingInBatch -= take;
-            }
-
-            if (remainingInBatch > 0) {
-              contributions.push({
-                batchId:
-                  currentBatch.id,
-                batchNumber:
-                  currentBatch.batchNumber,
-                harvestRecordId: null,
-                quantity:
-                  remainingInBatch,
-              });
-            }
-
-            const newStock = Number(
-              (currentStock - batchQuantity).toFixed(6)
-            );
-
-            const newStatus =
-              newStock <= 0
-                ? "Out of Stock"
-                : "Available";
-
-            plansForProduct.push({
-              productId,
-              quantity: batchQuantity,
-              batchRef: db
+            harvestUpdates.push({
+              ref: db
                 .collection(
-                  "productBatches"
+                  "harvestRecords"
                 )
-                .doc(currentBatch.id),
-              newStock,
-              newStatus,
-              freshness:
-                getFreshnessLabel(
-                  currentBatch
-                ),
-              harvestUpdates,
+                .doc(record.id),
+
+              remainingQuantity:
+                newRemaining,
             });
 
-            remaining -= batchQuantity;
+            contributions.push({
+              batchId:
+                currentBatch.id,
+
+              batchNumber:
+                currentBatch.batchNumber,
+
+              harvestRecordId:
+                record.id,
+
+              quantity: take,
+            });
+
+            remaining -=
+              take;
           }
 
-          if (remaining > 0) {
-            throw new StockFulfillmentError(
-              `Insufficient stock for ${
-                product.name ||
-                productId
-              }. Available: ${availableStock}, Requested: ${quantity}.`
+          /* -----------------------------------------------
+             LEGACY FALLBACK
+          ------------------------------------------------ */
+
+          if (
+            remaining > 0
+          ) {
+            contributions.push({
+              batchId:
+                currentBatch.id,
+
+              batchNumber:
+                currentBatch.batchNumber,
+
+              harvestRecordId:
+                null,
+
+              quantity:
+                remaining,
+            });
+
+            remaining = 0;
+          }
+
+          /* -----------------------------------------------
+             NEW BATCH STOCK
+          ------------------------------------------------ */
+
+          const newStock =
+            Number(
+              (
+                currentStock -
+                quantity
+              ).toFixed(6)
             );
-          }
 
-          plans.push(...plansForProduct);
+          const newStatus =
+            newStock <= 0
+              ? "Out of Stock"
+              : "Available";
+
+          plans.push({
+            productId,
+
+            quantity,
+
+            batchRef: db
+              .collection(
+                "productBatches"
+              )
+              .doc(
+                currentBatch.id
+              ),
+
+            newStock,
+
+            newStatus,
+
+            freshness:
+              getFreshnessLabel(
+                currentBatch
+              ),
+
+            harvestUpdates,
+
+            contributions,
+          });
 
           const primary =
             contributions[0] ||
@@ -1495,8 +1532,106 @@ const fulfillPaidOrder =
         }
 
         /* ---------------------------------------------------
-           WRITES
+           FARMER PENDING WALLET CREDIT
         --------------------------------------------------- */
+
+        const commissionRate = getCommissionRate();
+        const commissionAmount = roundMoney(
+          Number(order.subTotal || 0) * commissionRate
+        );
+        const farmerEarning = roundMoney(
+          Math.max(0, Number(order.subTotal || 0) - commissionAmount)
+        );
+
+        if (
+          order.farmerWalletPendingCredited !== true &&
+          farmerEarning > 0
+        ) {
+          const currentPending = roundMoney(
+            farmerWalletData.pendingBalance
+          );
+          const nextPending = roundMoney(
+            currentPending + farmerEarning
+          );
+
+          transaction.set(
+            farmerWalletRef,
+            {
+              farmerId: String(order.farmerId || ""),
+              availableBalance: roundMoney(
+                farmerWalletData.availableBalance
+              ),
+              pendingBalance: nextPending,
+              reservedBalance: roundMoney(
+                farmerWalletData.reservedBalance
+              ),
+              commissionReserveBalance: roundMoney(
+                farmerWalletData.commissionReserveBalance
+              ),
+              commissionReserveHeld: roundMoney(
+                farmerWalletData.commissionReserveHeld
+              ),
+              totalCommissionDeposited: roundMoney(
+                farmerWalletData.totalCommissionDeposited
+              ),
+              totalCodCommissionPaid: roundMoney(
+                farmerWalletData.totalCodCommissionPaid
+              ),
+              codCommissionDue: roundMoney(
+                farmerWalletData.codCommissionDue
+              ),
+              codDeliveryFeeDue: roundMoney(
+                farmerWalletData.codDeliveryFeeDue
+              ),
+              totalEarned: roundMoney(
+                farmerWalletData.totalEarned
+              ),
+              totalWithdrawn: roundMoney(
+                farmerWalletData.totalWithdrawn
+              ),
+              totalGcashEarnings: roundMoney(
+                farmerWalletData.totalGcashEarnings
+              ),
+              minimumReserve: roundMoney(
+                farmerWalletData.minimumReserve || 100
+              ),
+              currency: "PHP",
+              createdAt:
+                farmerWalletData.createdAt ||
+                FieldValue.serverTimestamp(),
+              updatedAt:
+                FieldValue.serverTimestamp(),
+            },
+            { merge: true }
+          );
+
+          const pendingTxnRef = db
+            .collection("walletTransactions")
+            .doc();
+
+          transaction.set(pendingTxnRef, {
+            farmerId: String(order.farmerId || ""),
+            type: "gcash_earning_pending",
+            direction: "memo",
+            amount: farmerEarning,
+            balanceAfter: roundMoney(
+              farmerWalletData.availableBalance
+            ),
+            pendingBalanceAfter: nextPending,
+            commissionAmount,
+            commissionRate,
+            orderId: orderSnap.id,
+            orderNumber: order.orderNumber || null,
+            status: "completed",
+            description: `GCash earning pending until delivery for ${order.orderNumber || orderSnap.id}.`,
+            createdAt: new Date(),
+            completedAt: new Date(),
+          });
+        }
+
+        /* ---------------------------------------------------
+           WRITES
+        ---------------------------------------------------
 
         /* ---------------------------------------------------
            1. HARVEST RECORDS
@@ -1647,6 +1782,18 @@ const fulfillPaidOrder =
             products:
               updatedProducts,
 
+            farmerWalletPendingCredited:
+              true,
+
+            farmerWalletPendingCreditedAt:
+              FieldValue.serverTimestamp(),
+
+            farmerWalletCredited:
+              false,
+
+            farmerWalletCreditedAt:
+              null,
+
             xenditWebhookEvent:
               "payment.capture",
 
@@ -1701,12 +1848,6 @@ app.get("/health", (req, res) => {
       !!getEnv(
         "XENDIT_WEBHOOK_TOKEN"
       ),
-
-    farmerWallet:
-      true,
-
-    farmerCommissionDeposit:
-      true,
 
     firebase:
       !!getEnv(
@@ -1836,24 +1977,6 @@ app.post(
           success: false,
           error:
             "This order is not a GCash order.",
-        });
-      }
-
-      /* ---------------------------------------------------
-         FARMER ACCEPTANCE REQUIRED
-      --------------------------------------------------- */
-
-      if (
-        order.status !==
-        "accepted"
-      ) {
-        return res.status(409).json({
-          success: false,
-          error:
-            "The farmer must accept the order before GCash payment.",
-          orderStatus:
-            order.status ||
-            "pending",
         });
       }
 
@@ -2068,9 +2191,6 @@ app.post(
           }`,
 
         metadata: {
-          type:
-            "order_payment",
-
           orderId:
             String(orderId),
 
@@ -2481,30 +2601,6 @@ app.post(
       const data =
         req.body?.data || {};
 
-      /* ---------------------------------------------------
-         FARMER COMMISSION RESERVE DEPOSIT
-         Uses the same Xendit webhook as buyer payments.
-      --------------------------------------------------- */
-
-      if (
-        data?.metadata?.type ===
-        "farmer_commission_deposit"
-      ) {
-        const depositResult =
-          await handleCommissionDepositWebhook({
-            db,
-            event,
-            data,
-          });
-
-        if (depositResult.handled) {
-          return res.status(200).json({
-            success: true,
-            ...depositResult,
-          });
-        }
-      }
-
       console.log(
         "========================================"
       );
@@ -2551,6 +2647,29 @@ app.post(
       console.log(
         "========================================"
       );
+
+      /* ---------------------------------------------------
+         COMMISSION RESERVE DEPOSIT WEBHOOK
+      --------------------------------------------------- */
+
+      const depositWebhook =
+        await handleCommissionDepositWebhook({
+          db,
+          event,
+          data,
+        });
+
+      if (depositWebhook?.handled) {
+        return res.status(200).json({
+          success: true,
+          message: depositWebhook?.failed
+            ? "Commission reserve deposit payment failure recorded."
+            : depositWebhook?.manualReview
+              ? "Commission reserve deposit requires manual review."
+              : "Commission reserve deposit webhook handled.",
+          deposit: depositWebhook,
+        });
+      }
 
       /* ---------------------------------------------------
          PAYMENT AUTHORIZATION
@@ -2991,60 +3110,6 @@ app.post(
       }
 
       /* ---------------------------------------------------
-         FARMER ACCEPTANCE CHECK
-      --------------------------------------------------- */
-      if (
-        order.status !==
-        "accepted" &&
-        order.status !==
-        "processing"
-      ) {
-        await orderRef.update({
-          paymentStatus:
-            "paid",
-          xenditPaymentId:
-            data.payment_id ||
-            null,
-          xenditPaymentRequestId:
-            data.payment_request_id ||
-            null,
-          xenditReferenceId:
-            data.reference_id ||
-            null,
-          xenditPaymentChannel:
-            data.channel_code ||
-            "GCASH",
-          xenditPaymentStatus:
-            data.status ||
-            "SUCCEEDED",
-          paidAt:
-            FieldValue.serverTimestamp(),
-          inventoryFulfilled:
-            false,
-          fulfillmentStatus:
-            "manual_review",
-          fulfillmentError:
-            "Payment was received but the order was not in an accepted/processing state.",
-          xenditWebhookEvent:
-            "payment.capture",
-          xenditWebhookReceivedAt:
-            FieldValue.serverTimestamp(),
-          updatedAt:
-            FieldValue.serverTimestamp(),
-        });
-
-        console.error(
-          `Payment captured for order ${orderSnap.id} without valid farmer acceptance. Manual review required.`
-        );
-
-        return res.status(200).json({
-          success: true,
-          message:
-            "Payment received but order state requires manual review.",
-        });
-      }
-
-      /* ---------------------------------------------------
          IDEMPOTENCY QUICK CHECK
       --------------------------------------------------- */
 
@@ -3230,16 +3295,6 @@ app.get(
           ""
       );
 
-    const paymentType =
-      String(
-        req.query.type ||
-          "order_payment"
-      );
-
-    const isDeposit =
-      paymentType ===
-      "farmer_deposit";
-
     res.status(200).send(`
 <!DOCTYPE html>
 <html>
@@ -3261,23 +3316,19 @@ app.get(
     padding: 40px;
   "
 >
-  <h2>${isDeposit ? "Commission Reserve Deposit Submitted" : "Payment Submitted"}</h2>
+  <h2>Payment Submitted</h2>
 
   <p>
-    ${
-      isDeposit
-        ? "Your commission reserve GCash deposit has been submitted."
-        : "Your GCash order payment has been submitted."
-    }
+    Your GCash payment has been submitted.
   </p>
 
   <p>
-    FarmGate is waiting for the final payment confirmation from Xendit.
+    FarmGate is waiting for the final payment confirmation.
   </p>
 
   <p>
-    ${isDeposit ? "Deposit ID" : "Order ID"}:
-    <strong>${orderId || String(req.query.depositId || "")}</strong>
+    Order ID:
+    <strong>${orderId}</strong>
   </p>
 
   <p>
@@ -3302,16 +3353,6 @@ app.get(
           ""
       );
 
-    const paymentType =
-      String(
-        req.query.type ||
-          "order_payment"
-      );
-
-    const isDeposit =
-      paymentType ===
-      "farmer_deposit";
-
     res.status(200).send(`
 <!DOCTYPE html>
 <html>
@@ -3333,19 +3374,15 @@ app.get(
     padding: 40px;
   "
 >
-  <h2>${isDeposit ? "Commission Reserve Deposit Failed" : "Payment Failed"}</h2>
+  <h2>Payment Failed</h2>
 
   <p>
-    ${
-      isDeposit
-        ? "The commission reserve GCash deposit was not completed."
-        : "The GCash payment was not completed."
-    }
+    The GCash payment was not completed.
   </p>
 
   <p>
-    ${isDeposit ? "Deposit ID" : "Order ID"}:
-    <strong>${orderId || String(req.query.depositId || "")}</strong>
+    Order ID:
+    <strong>${orderId}</strong>
   </p>
 
   <p>

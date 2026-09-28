@@ -1673,13 +1673,25 @@ const createWalletRouter = ({ db, auth }) => {
         const now = new Date();
 
         let nextAvailable = wallet.availableBalance;
+        let nextPending = wallet.pendingBalance;
         let nextReserve = wallet.commissionReserveBalance;
         let nextHeld = wallet.commissionReserveHeld;
         let farmerEarning = 0;
 
         if (order.payment === "gcash") {
           farmerEarning = roundMoney(commission.subtotal - commissionAmount);
-          nextAvailable = roundMoney(wallet.availableBalance + farmerEarning);
+
+          // GCash payment was already credited to pendingBalance when the
+          // Xendit payment.capture webhook completed. Delivery only moves
+          // the same earning from pending -> available.
+          if (nextPending + 0.001 < farmerEarning) {
+            throw new Error(
+              `GCash pending balance is insufficient for this order. Required: ₱${farmerEarning.toFixed(2)}.`
+            );
+          }
+
+          nextPending = roundMoney(nextPending - farmerEarning);
+          nextAvailable = roundMoney(nextAvailable + farmerEarning);
         } else if (order.payment === "cod") {
           const reservedAmount = roundMoney(order.codCommissionReserved);
 
@@ -1702,6 +1714,7 @@ const createWalletRouter = ({ db, auth }) => {
           {
             ...wallet,
             availableBalance: nextAvailable,
+            pendingBalance: nextPending,
             commissionReserveBalance: nextReserve,
             commissionReserveHeld: nextHeld,
             totalEarned:
@@ -1755,6 +1768,7 @@ const createWalletRouter = ({ db, auth }) => {
             direction: "credit",
             amount: farmerEarning,
             balanceAfter: nextAvailable,
+            pendingBalanceAfter: nextPending,
             commissionReserveAfter: nextReserve,
             commissionReserveHeldAfter: nextHeld,
             orderId,
@@ -1800,6 +1814,7 @@ const createWalletRouter = ({ db, auth }) => {
           commissionChargedAt: now,
           farmerEarning,
           farmerWalletCredited: order.payment === "gcash",
+          farmerWalletPendingCredited: false,
           farmerWalletCreditedAt: order.payment === "gcash" ? now : null,
           financialStatus: "settled",
           codCommissionReservationStatus:
