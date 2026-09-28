@@ -230,6 +230,49 @@ const getCodCommission = (order) => {
   };
 };
 
+const getExpectedFarmerEarning = (order) => {
+  const subtotal = getOrderSubtotal(order);
+  const savedEarning = normalizeAmount(order?.farmerEarning);
+
+  if (Number.isFinite(savedEarning) && savedEarning > 0) {
+    return savedEarning;
+  }
+
+  const commission = roundMoney(subtotal * getCommissionRate());
+  return roundMoney(Math.max(0, subtotal - commission));
+};
+
+const getPendingProductBalance = async (db, farmerId) => {
+  const snapshot = await db
+    .collection("orders")
+    .where("farmerId", "==", farmerId)
+    .get();
+
+  const pendingStatuses = new Set([
+    "accepted",
+    "processing",
+    "to_receive",
+  ]);
+
+  let total = 0;
+
+  for (const docSnap of snapshot.docs) {
+    const order = docSnap.data() || {};
+
+    if (!pendingStatuses.has(String(order.status || ""))) {
+      continue;
+    }
+
+    if (order.payment === "gcash" && order.paymentStatus !== "paid") {
+      continue;
+    }
+
+    total += getExpectedFarmerEarning(order);
+  }
+
+  return roundMoney(total);
+};
+
 const getAvailableStockForOrder = async (db, products) => {
   for (const product of products || []) {
     const productId = String(product?.productId || "");
@@ -823,15 +866,27 @@ const createWalletRouter = ({ db, auth }) => {
       const ref = db.collection("farmerWallets").doc(farmerId);
       const snap = await ref.get();
       const wallet = sanitizeWallet(farmerId, snap.exists ? snap.data() : {});
+      const pendingBalance = await getPendingProductBalance(db, farmerId);
+      const walletWithPending = {
+        ...wallet,
+        pendingBalance,
+      };
 
-      if (!snap.exists) {
-        await ref.set({ ...wallet, createdAt: new Date(), updatedAt: new Date() });
+      if (!snap.exists || Number(wallet.pendingBalance || 0) !== pendingBalance) {
+        await ref.set(
+          {
+            ...walletWithPending,
+            ...(snap.exists ? {} : { createdAt: new Date() }),
+            updatedAt: new Date(),
+          },
+          { merge: true }
+        );
       }
 
       return res.json({
         success: true,
-        wallet,
-        withdrawableAmount: getWithdrawableAmount(wallet),
+        wallet: walletWithPending,
+        withdrawableAmount: getWithdrawableAmount(walletWithPending),
         minimumCommissionDeposit: getMinimumCommissionDeposit(),
       });
     } catch (error) {
@@ -1885,6 +1940,49 @@ const createWalletRouter = ({ db, auth }) => {
     } catch (error) {
       console.error("DELIVER ORDER / WALLET SETTLEMENT ERROR:", error);
       return res.status(400).json({ success: false, error: error.message });
+    }
+  });
+
+  router.get("/admin/financial-summary", async (req, res) => {
+    try {
+      const decoded = await getAuthUser(req, auth);
+      const userSnap = await db.collection("users").doc(decoded.uid).get();
+
+      if (!userSnap.exists || userSnap.data()?.role !== "admin") {
+        return res.status(403).json({
+          success: false,
+          error: "Only admin accounts can view FarmGate financial summary.",
+        });
+      }
+
+      const summaryRef = db
+        .collection("farmgateFinancialSummary")
+        .doc("summary");
+      const summarySnap = await summaryRef.get();
+
+      const summary = summarySnap.exists
+        ? summarySnap.data() || {}
+        : {};
+
+      return res.json({
+        success: true,
+        summary: {
+          totalCommission: roundMoney(summary.totalCommission),
+          totalDeliveryFees: roundMoney(summary.totalDeliveryFees),
+          totalFarmerEarnings: roundMoney(summary.totalFarmerEarnings),
+          totalFarmerWithdrawals: roundMoney(summary.totalFarmerWithdrawals),
+          totalFarmerCommissionDeposits: roundMoney(
+            summary.totalFarmerCommissionDeposits
+          ),
+          updatedAt: summary.updatedAt || null,
+        },
+      });
+    } catch (error) {
+      console.error("GET FARMGATE FINANCIAL SUMMARY ERROR:", error);
+      return res.status(500).json({
+        success: false,
+        error: error.message || "Failed to load FarmGate financial summary.",
+      });
     }
   });
 
