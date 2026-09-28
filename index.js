@@ -2,6 +2,10 @@ const express = require("express");
 const cors = require("cors");
 const cloudinary = require("cloudinary").v2;
 const crypto = require("crypto");
+const {
+  createWalletRouter,
+  handleCommissionDepositWebhook,
+} = require("./walletRoutes");
 require("dotenv").config();
 
 const {
@@ -88,6 +92,18 @@ const firebaseApp =
 
 const db = getFirestore(firebaseApp);
 const auth = getAuth(firebaseApp);
+
+/* =========================================================
+   FARMER WALLET / COMMISSION RESERVE ROUTES
+========================================================= */
+
+app.use(
+  "/wallet",
+  createWalletRouter({
+    db,
+    auth,
+  })
+);
 
 /* =========================================================
    CLOUDINARY
@@ -1686,6 +1702,12 @@ app.get("/health", (req, res) => {
         "XENDIT_WEBHOOK_TOKEN"
       ),
 
+    farmerWallet:
+      true,
+
+    farmerCommissionDeposit:
+      true,
+
     firebase:
       !!getEnv(
         "FIREBASE_PROJECT_ID"
@@ -2046,6 +2068,9 @@ app.post(
           }`,
 
         metadata: {
+          type:
+            "order_payment",
+
           orderId:
             String(orderId),
 
@@ -2455,6 +2480,30 @@ app.post(
 
       const data =
         req.body?.data || {};
+
+      /* ---------------------------------------------------
+         FARMER COMMISSION RESERVE DEPOSIT
+         Uses the same Xendit webhook as buyer payments.
+      --------------------------------------------------- */
+
+      if (
+        data?.metadata?.type ===
+        "farmer_commission_deposit"
+      ) {
+        const depositResult =
+          await handleCommissionDepositWebhook({
+            db,
+            event,
+            data,
+          });
+
+        if (depositResult.handled) {
+          return res.status(200).json({
+            success: true,
+            ...depositResult,
+          });
+        }
+      }
 
       console.log(
         "========================================"
@@ -3181,6 +3230,16 @@ app.get(
           ""
       );
 
+    const paymentType =
+      String(
+        req.query.type ||
+          "order_payment"
+      );
+
+    const isDeposit =
+      paymentType ===
+      "farmer_deposit";
+
     res.status(200).send(`
 <!DOCTYPE html>
 <html>
@@ -3202,19 +3261,23 @@ app.get(
     padding: 40px;
   "
 >
-  <h2>Payment Submitted</h2>
+  <h2>${isDeposit ? "Commission Reserve Deposit Submitted" : "Payment Submitted"}</h2>
 
   <p>
-    Your GCash payment has been submitted.
+    ${
+      isDeposit
+        ? "Your commission reserve GCash deposit has been submitted."
+        : "Your GCash order payment has been submitted."
+    }
   </p>
 
   <p>
-    FarmGate is waiting for the final payment confirmation.
+    FarmGate is waiting for the final payment confirmation from Xendit.
   </p>
 
   <p>
-    Order ID:
-    <strong>${orderId}</strong>
+    ${isDeposit ? "Deposit ID" : "Order ID"}:
+    <strong>${orderId || String(req.query.depositId || "")}</strong>
   </p>
 
   <p>
@@ -3239,6 +3302,16 @@ app.get(
           ""
       );
 
+    const paymentType =
+      String(
+        req.query.type ||
+          "order_payment"
+      );
+
+    const isDeposit =
+      paymentType ===
+      "farmer_deposit";
+
     res.status(200).send(`
 <!DOCTYPE html>
 <html>
@@ -3260,15 +3333,19 @@ app.get(
     padding: 40px;
   "
 >
-  <h2>Payment Failed</h2>
+  <h2>${isDeposit ? "Commission Reserve Deposit Failed" : "Payment Failed"}</h2>
 
   <p>
-    The GCash payment was not completed.
+    ${
+      isDeposit
+        ? "The commission reserve GCash deposit was not completed."
+        : "The GCash payment was not completed."
+    }
   </p>
 
   <p>
-    Order ID:
-    <strong>${orderId}</strong>
+    ${isDeposit ? "Deposit ID" : "Order ID"}:
+    <strong>${orderId || String(req.query.depositId || "")}</strong>
   </p>
 
   <p>
