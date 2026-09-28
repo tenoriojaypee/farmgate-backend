@@ -6,7 +6,6 @@ const XENDIT_BASE_URL = "https://api.xendit.co";
 const XENDIT_PAYMENT_API_VERSION = "2024-11-11";
 const XENDIT_PAYOUT_API_VERSION = "2025-09-01";
 
-const DEFAULT_MINIMUM_WITHDRAW_RESERVE = 100;
 const DEFAULT_COMMISSION_RATE = 0.03;
 const DEFAULT_MIN_COMMISSION_DEPOSIT = 100;
 const MAX_COMMISSION_DEPOSIT = 100000;
@@ -35,12 +34,6 @@ const getCommissionRate = () => {
     ? configured
     : DEFAULT_COMMISSION_RATE;
 };
-
-const getMinimumWithdrawReserve = () =>
-  normalizeAmount(
-    getEnv("FARMER_WALLET_MINIMUM_RESERVE") ||
-      DEFAULT_MINIMUM_WITHDRAW_RESERVE
-  );
 
 const getMinimumCommissionDeposit = () =>
   normalizeAmount(
@@ -178,7 +171,9 @@ const walletDefaults = (farmerId) => ({
   totalEarned: 0,
   totalWithdrawn: 0,
   totalGcashEarnings: 0,
-  minimumReserve: getMinimumWithdrawReserve(),
+  // Kept for backward compatibility with old wallet documents.
+  // FarmGate no longer enforces a minimum earnings-wallet reserve.
+  minimumReserve: 0,
   currency: "PHP",
 });
 
@@ -198,9 +193,8 @@ const sanitizeWallet = (farmerId, data = {}) => ({
   totalEarned: normalizeAmount(data.totalEarned),
   totalWithdrawn: normalizeAmount(data.totalWithdrawn),
   totalGcashEarnings: normalizeAmount(data.totalGcashEarnings),
-  minimumReserve: normalizeAmount(
-    data.minimumReserve || getMinimumWithdrawReserve()
-  ),
+  // Minimum wallet reserve is no longer enforced.
+  minimumReserve: 0,
   currency: "PHP",
 });
 
@@ -209,7 +203,6 @@ const getWithdrawableAmount = (wallet) =>
     0,
     roundMoney(wallet.availableBalance) -
       roundMoney(wallet.reservedBalance) -
-      roundMoney(wallet.minimumReserve) -
       roundMoney(wallet.codCommissionDue) -
       roundMoney(wallet.codDeliveryFeeDue)
   );
@@ -288,7 +281,9 @@ const payoutRequest = async ({
 
   const normalizedGcash = normalizeGcashNumber(accountNumber);
   const { givenName, surname } = splitName(accountName);
-  const postalCode = String(user.postalCode || "").trim();
+  const postalCode = String(
+    user.payoutPostalCode || user.postalCode || ""
+  ).trim();
   const payoutCity = String(user.municipality || user.city || "").trim();
   const payoutProvince = String(user.province || "").trim();
   const payoutStreet = String(
@@ -303,7 +298,7 @@ const payoutRequest = async ({
 
   if (!/^\d{4}$/.test(postalCode)) {
     throw new Error(
-      "Your farmer profile must have a valid 4-digit postal code before a GCash payout can be sent."
+      "Your GCash payout account must have a valid 4-digit postal code before a GCash payout can be sent."
     );
   }
 
@@ -1079,6 +1074,72 @@ const createWalletRouter = ({ db, auth }) => {
     }
   });
 
+  router.get("/deposits/:depositId", async (req, res) => {
+    try {
+      const { decoded } = await requireFarmer(req, auth, db);
+      const depositId = String(req.params.depositId || "").trim();
+
+      if (!depositId) {
+        return res.status(400).json({
+          success: false,
+          error: "Deposit ID is required.",
+        });
+      }
+
+      const depositRef = db
+        .collection("farmerCommissionDeposits")
+        .doc(depositId);
+      const depositSnap = await depositRef.get();
+
+      if (!depositSnap.exists) {
+        return res.status(404).json({
+          success: false,
+          error: "Commission deposit not found.",
+        });
+      }
+
+      const deposit = depositSnap.data() || {};
+
+      if (deposit.farmerId !== decoded.uid) {
+        return res.status(403).json({
+          success: false,
+          error: "You are not authorized to view this deposit.",
+        });
+      }
+
+      const walletSnap = await db
+        .collection("farmerWallets")
+        .doc(decoded.uid)
+        .get();
+      const wallet = sanitizeWallet(
+        decoded.uid,
+        walletSnap.exists ? walletSnap.data() : {}
+      );
+
+      return res.json({
+        success: true,
+        deposit: {
+          id: depositSnap.id,
+          farmerId: decoded.uid,
+          amount: normalizeAmount(deposit.amount),
+          status: deposit.status || "pending",
+          referenceId: deposit.referenceId || null,
+          xenditPaymentStatus: deposit.xenditPaymentStatus || null,
+          failureReason: deposit.failureReason || null,
+          createdAt: deposit.createdAt || null,
+          updatedAt: deposit.updatedAt || null,
+        },
+        commissionReserveBalance: wallet.commissionReserveBalance,
+      });
+    } catch (error) {
+      console.error("GET COMMISSION DEPOSIT STATUS ERROR:", error);
+      return res.status(400).json({
+        success: false,
+        error: error.message || "Unable to load deposit status.",
+      });
+    }
+  });
+
   router.get("/cod-eligibility/:orderId", async (req, res) => {
     try {
       const { decoded } = await requireFarmer(req, auth, db);
@@ -1523,7 +1584,7 @@ const createWalletRouter = ({ db, auth }) => {
         transaction.set(withdrawalRef, {
           farmerId: uid,
           amount,
-          minimumReserve: freshWallet.minimumReserve,
+          minimumReserve: 0,
           payoutFee: 0,
           netAmount: amount,
           payoutMethod: "gcash",
@@ -1546,7 +1607,11 @@ const createWalletRouter = ({ db, auth }) => {
           accountName: payoutAccount.accountName,
           accountNumber: payoutAccount.accountNumber,
           amount,
-          user: { ...user, farmerId: uid },
+          user: {
+            ...user,
+            farmerId: uid,
+            payoutPostalCode: payoutAccount.postalCode || "",
+          },
         });
 
         await withdrawalRef.update({
@@ -1564,7 +1629,7 @@ const createWalletRouter = ({ db, auth }) => {
             id: withdrawalId,
             farmerId: uid,
             amount,
-            minimumReserve: wallet.minimumReserve,
+            minimumReserve: 0,
             commissionReserveBalance: wallet.commissionReserveBalance,
             commissionReserveHeld: wallet.commissionReserveHeld,
             payoutFee: 0,
@@ -1580,11 +1645,10 @@ const createWalletRouter = ({ db, auth }) => {
             requestedAt: now,
             processingAt: new Date(),
           },
-          withdrawableAmount: Math.max(
-            0,
-            roundMoney(availableAfterReserve) -
-              roundMoney(wallet.minimumReserve)
-          ),
+          withdrawableAmount: getWithdrawableAmount({
+            ...wallet,
+            availableBalance: availableAfterReserve,
+          }),
         });
       } catch (payoutError) {
         await db.runTransaction(async (transaction) => {
@@ -1673,25 +1737,13 @@ const createWalletRouter = ({ db, auth }) => {
         const now = new Date();
 
         let nextAvailable = wallet.availableBalance;
-        let nextPending = wallet.pendingBalance;
         let nextReserve = wallet.commissionReserveBalance;
         let nextHeld = wallet.commissionReserveHeld;
         let farmerEarning = 0;
 
         if (order.payment === "gcash") {
           farmerEarning = roundMoney(commission.subtotal - commissionAmount);
-
-          // GCash payment was already credited to pendingBalance when the
-          // Xendit payment.capture webhook completed. Delivery only moves
-          // the same earning from pending -> available.
-          if (nextPending + 0.001 < farmerEarning) {
-            throw new Error(
-              `GCash pending balance is insufficient for this order. Required: ₱${farmerEarning.toFixed(2)}.`
-            );
-          }
-
-          nextPending = roundMoney(nextPending - farmerEarning);
-          nextAvailable = roundMoney(nextAvailable + farmerEarning);
+          nextAvailable = roundMoney(wallet.availableBalance + farmerEarning);
         } else if (order.payment === "cod") {
           const reservedAmount = roundMoney(order.codCommissionReserved);
 
@@ -1714,7 +1766,6 @@ const createWalletRouter = ({ db, auth }) => {
           {
             ...wallet,
             availableBalance: nextAvailable,
-            pendingBalance: nextPending,
             commissionReserveBalance: nextReserve,
             commissionReserveHeld: nextHeld,
             totalEarned:
@@ -1768,7 +1819,6 @@ const createWalletRouter = ({ db, auth }) => {
             direction: "credit",
             amount: farmerEarning,
             balanceAfter: nextAvailable,
-            pendingBalanceAfter: nextPending,
             commissionReserveAfter: nextReserve,
             commissionReserveHeldAfter: nextHeld,
             orderId,
@@ -1814,7 +1864,6 @@ const createWalletRouter = ({ db, auth }) => {
           commissionChargedAt: now,
           farmerEarning,
           farmerWalletCredited: order.payment === "gcash",
-          farmerWalletPendingCredited: false,
           farmerWalletCreditedAt: order.payment === "gcash" ? now : null,
           financialStatus: "settled",
           codCommissionReservationStatus:
