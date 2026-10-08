@@ -107,19 +107,6 @@ const db = getFirestore(firebaseApp);
 const auth = getAuth(firebaseApp);
 
 /* =========================================================
-   FARMER WALLET / PAYOUT ROUTES
-========================================================= */
-
-app.use(
-  "/wallet",
-  createWalletRouter({
-    db,
-    auth,
-    getEnv,
-  })
-);
-
-/* =========================================================
    CLOUDINARY
 ========================================================= */
 
@@ -732,6 +719,183 @@ const applyInventoryPlans = (transaction, plans) => {
 };
 
 /* =========================================================
+   RESTOCK (undo planInventory when an accepted COD order is cancelled)
+
+   planRestock  -> READS ONLY  (must run before any write)
+   applyRestock -> WRITES ONLY
+   Uses the batch / harvest "contributions" that were saved on each
+   order product when the stock was deducted.
+========================================================= */
+
+const round6 = (value) => Number(Number(value).toFixed(6));
+
+const planRestock = async (transaction, order) => {
+  const items = Array.isArray(order.products) ? order.products : [];
+
+  const writes = [];
+  let skipped = false;
+
+  for (const item of items) {
+    const productId = String(item?.productId || "");
+
+    const contributions = (
+      Array.isArray(item?.contributions) ? item.contributions : []
+    ).filter((c) => Number(c?.quantity) > 0);
+
+    // No trace of where the stock came from -> cannot restore automatically.
+    if (!productId || contributions.length === 0) {
+      skipped = true;
+      continue;
+    }
+
+    const byBatch = new Map();
+    const byHarvest = new Map();
+    let totalQuantity = 0;
+
+    for (const contribution of contributions) {
+      const quantity = Number(contribution.quantity);
+
+      totalQuantity += quantity;
+
+      if (contribution.batchId) {
+        const key = String(contribution.batchId);
+        byBatch.set(key, (byBatch.get(key) || 0) + quantity);
+      }
+
+      if (contribution.harvestRecordId) {
+        const key = String(contribution.harvestRecordId);
+        byHarvest.set(key, (byHarvest.get(key) || 0) + quantity);
+      }
+    }
+
+    const productRef = db.collection("products").doc(productId);
+    const harvestIds = Array.from(byHarvest.keys());
+
+    // ---------- READS ----------
+    const [productSnap, batchSnapshot, ...harvestSnaps] = await Promise.all([
+      transaction.get(productRef),
+      transaction.get(
+        db.collection("productBatches").where("productId", "==", productId)
+      ),
+      ...harvestIds.map((id) =>
+        transaction.get(db.collection("harvestRecords").doc(id))
+      ),
+    ]);
+
+    // ---------- BATCHES ----------
+    const batches = batchSnapshot.docs.map((docSnap) => {
+      const data = docSnap.data() || {};
+      const restoreQuantity = byBatch.get(docSnap.id) || 0;
+
+      const stock = Number(data.stock || 0);
+      const newStock = restoreQuantity > 0 ? round6(stock + restoreQuantity) : stock;
+
+      const newStatus =
+        restoreQuantity > 0 && data.status === "Out of Stock" && newStock > 0
+          ? "Available"
+          : data.status;
+
+      return {
+        id: docSnap.id,
+        ref: docSnap.ref,
+        data,
+        restoreQuantity,
+        stock: newStock,
+        status: newStatus,
+      };
+    });
+
+    for (const batch of batches) {
+      if (batch.restoreQuantity > 0) {
+        writes.push({
+          ref: batch.ref,
+          data: { stock: batch.stock, status: batch.status },
+        });
+      }
+    }
+
+    // ---------- HARVEST RECORDS ----------
+    harvestSnaps.forEach((harvestSnap, index) => {
+      if (!harvestSnap.exists) return;
+
+      const remaining = Number(harvestSnap.data()?.remainingQuantity || 0);
+
+      writes.push({
+        ref: harvestSnap.ref,
+        data: {
+          remainingQuantity: round6(
+            remaining + (byHarvest.get(harvestIds[index]) || 0)
+          ),
+        },
+      });
+    });
+
+    // ---------- PRODUCT (mirrors what planInventory/applyInventoryPlans wrote) ----------
+    if (productSnap.exists) {
+      const product = productSnap.data() || {};
+
+      const current = batches
+        .filter((batch) => batch.data.archived !== true)
+        .sort(
+          (first, second) =>
+            Number(second.data.batchNumber || 0) -
+            Number(first.data.batchNumber || 0)
+        )[0];
+
+      const productUpdate = {
+        totalSales: Math.max(0, Number(product.totalSales || 0) - totalQuantity),
+        weeklySales: Math.max(0, Number(product.weeklySales || 0) - totalQuantity),
+        monthlySales: Math.max(
+          0,
+          Number(product.monthlySales || 0) - totalQuantity
+        ),
+      };
+
+      if (current) {
+        const sellable = current.stock > 0 && current.status === "Available";
+
+        productUpdate.stock = current.stock;
+        productUpdate.status = sellable ? "Available" : "Out of Stock";
+        productUpdate.freshness = getFreshnessLabel(current.data);
+      }
+
+      writes.push({ ref: productRef, data: productUpdate });
+    }
+  }
+
+  return { writes, skipped };
+};
+
+const applyRestock = (transaction, plan) => {
+  for (const write of plan.writes) {
+    transaction.update(write.ref, {
+      ...write.data,
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+  }
+};
+
+/* =========================================================
+   FARMER WALLET / PAYOUT ROUTES
+   (mounted here because it needs the inventory helpers above)
+========================================================= */
+
+app.use(
+  "/wallet",
+  createWalletRouter({
+    db,
+    auth,
+    getEnv,
+    inventory: {
+      planInventory,
+      applyInventoryPlans,
+      planRestock,
+      applyRestock,
+    },
+  })
+);
+
+/* =========================================================
    FULFILL PAID GCASH ORDER
    Money is NOT touched here. The farmer is credited only when the
    order is delivered (wallet route), and "pending" earnings are
@@ -911,7 +1075,9 @@ app.post("/delete-image", async (req, res) => {
 /* =========================================================
    ORDER STATUS: PROCESSING
    - GCash: payment + inventory must already be fulfilled.
-   - COD  : stock is deducted HERE, atomically, on the server.
+   - COD  : stock is normally already deducted when the farmer accepted
+            the order. Only legacy accepted orders (inventoryFulfilled=false)
+            are deducted here, atomically, on the server.
 ========================================================= */
 
 app.post("/orders/:orderId/process", async (req, res) => {

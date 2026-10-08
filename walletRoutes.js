@@ -433,51 +433,15 @@ const getPendingProductBalance = async (db, farmerId) => {
     if (order.payment !== "gcash") continue;
     if (order.paymentStatus !== "paid") continue;
 
-    // Already credited to the wallet at delivery.
+    // Already delivered / credited to the wallet.
     if (order.financialStatus === "settled") continue;
+    if (order.farmerWalletCredited === true) continue;
+    if (order.deliveredAt) continue;
 
     total += getExpectedFarmerEarning(order);
   }
 
   return roundMoney(total);
-};
-
-const getAvailableStockForOrder = async (db, products) => {
-  for (const product of products || []) {
-    const productId = String(product?.productId || "");
-    const quantity = Number(product?.quantity || 0);
-
-    if (!productId || !Number.isFinite(quantity) || quantity <= 0) {
-      throw new Error("Order contains an invalid product or quantity.");
-    }
-
-    const snapshot = await db
-      .collection("productBatches")
-      .where("productId", "==", productId)
-      .get();
-
-    const available = snapshot.docs.reduce((sum, docSnap) => {
-      const batch = docSnap.data() || {};
-      const stock = Number(batch.stock || 0);
-
-      if (
-        batch.archived === true ||
-        batch.status !== "Available" ||
-        !Number.isFinite(stock) ||
-        stock <= 0
-      ) {
-        return sum;
-      }
-
-      return sum + stock;
-    }, 0);
-
-    if (available < quantity) {
-      throw new Error(
-        `Insufficient stock for ${product.name || productId}. Available: ${available}, Requested: ${quantity}.`
-      );
-    }
-  }
 };
 
 /* =========================================================
@@ -1194,8 +1158,20 @@ const handleCommissionDepositWebhook = async ({ db, event, data }) => {
    ROUTER
 ========================================================= */
 
-const createWalletRouter = ({ db, auth }) => {
+const createWalletRouter = ({ db, auth, inventory }) => {
   const router = express.Router();
+
+  const { planInventory, applyInventoryPlans, planRestock, applyRestock } =
+    inventory || {};
+
+  if (
+    !planInventory ||
+    !applyInventoryPlans ||
+    !planRestock ||
+    !applyRestock
+  ) {
+    throw new Error("createWalletRouter requires the inventory helpers.");
+  }
 
   const loadFarmerTransactions = async (farmerId) => {
     const base = db
@@ -1705,8 +1681,9 @@ const createWalletRouter = ({ db, auth }) => {
 
   // ------------------------------------------------------------
   // ACCEPT ORDER
-  // COD: the order is re-priced from the products collection and the
-  //      commission is held from the reserve. GCash holds nothing here.
+  // COD  : re-priced on the server, the commission is held from the
+  //        reserve, and STOCK IS DEDUCTED NOW (at acceptance), atomically.
+  // GCash: nothing is held; stock is deducted when payment is captured.
   // ------------------------------------------------------------
   router.post("/orders/:orderId/accept", async (req, res) => {
     try {
@@ -1747,14 +1724,17 @@ const createWalletRouter = ({ db, auth }) => {
         const rate = getCommissionRate();
 
         let pricing = null;
+        let inventoryPlan = null;
         let nextWallet = wallet;
         let reservationAmount = 0;
         let commissionAmount;
 
         if (order.payment === "cod") {
-          pricing = await priceOrderOnServer(transaction, db, order);
+          if (order.inventoryFulfilled === true) {
+            throw new Error("Stock was already deducted for this order.");
+          }
 
-          await getAvailableStockForOrder(db, pricing.products);
+          pricing = await priceOrderOnServer(transaction, db, order);
 
           reservationAmount = roundMoney(pricing.subtotal * rate);
           commissionAmount = reservationAmount;
@@ -1764,6 +1744,13 @@ const createWalletRouter = ({ db, auth }) => {
               `Insufficient commission reserve. Required: ₱${reservationAmount.toFixed(2)}. Available: ₱${wallet.commissionReserveBalance.toFixed(2)}. Please deposit first.`
             );
           }
+
+          // Reads batches / harvest records and throws STOCK_UNAVAILABLE
+          // if there is not enough stock. Still reads only.
+          inventoryPlan = await planInventory(transaction, {
+            ...order,
+            products: pricing.products,
+          });
 
           nextWallet = {
             ...wallet,
@@ -1778,6 +1765,8 @@ const createWalletRouter = ({ db, auth }) => {
           };
 
           // ---------- WRITES ----------
+          applyInventoryPlans(transaction, inventoryPlan.plans);
+
           transaction.set(walletRef, nextWallet, { merge: true });
 
           transaction.set(db.collection("walletTransactions").doc(), {
@@ -1806,19 +1795,24 @@ const createWalletRouter = ({ db, auth }) => {
           farmerDecisionAt: now,
 
           paymentStatus: order.paymentStatus || "pending",
-          inventoryFulfilled: false,
-          fulfillmentStatus: "pending",
 
           ...(pricing
             ? {
-                products: pricing.products,
+                products: inventoryPlan.updatedProducts,
                 subTotal: pricing.subtotal,
                 deliveryFee: pricing.deliveryFee,
                 total: pricing.total,
                 serverValidated: true,
                 serverValidatedAt: now,
+
+                inventoryFulfilled: true,
+                fulfillmentStatus: "fulfilled",
+                inventoryFulfilledAt: now,
               }
-            : {}),
+            : {
+                inventoryFulfilled: false,
+                fulfillmentStatus: "pending",
+              }),
 
           commissionRate: rate,
           commissionAmount,
@@ -1844,7 +1838,9 @@ const createWalletRouter = ({ db, auth }) => {
     } catch (error) {
       console.error("ACCEPT ORDER ERROR:", error);
 
-      return res.status(400).json({ success: false, error: error.message });
+      return res
+        .status(error.code === "STOCK_UNAVAILABLE" ? 409 : 400)
+        .json({ success: false, error: error.message });
     }
   });
 
@@ -1911,6 +1907,8 @@ const createWalletRouter = ({ db, auth }) => {
   // CANCEL ORDER
   // Buyer: pending / accepted (unpaid).  Farmer: pending / accepted.
   // No cancellation after processing. Paid GCash needs a refund flow.
+  // An accepted COD order already had its stock deducted, so cancelling
+  // it also RESTORES the stock and releases the held commission.
   // ------------------------------------------------------------
   router.post("/orders/:orderId/cancel", async (req, res) => {
     try {
@@ -1920,6 +1918,7 @@ const createWalletRouter = ({ db, auth }) => {
       const reason = String(req.body?.reason || "Cancelled by user.").trim();
 
       const result = await db.runTransaction(async (transaction) => {
+        // ---------- READS ----------
         const orderSnap = await transaction.get(orderRef);
 
         if (!orderSnap.exists) throw new Error("Order not found.");
@@ -1945,31 +1944,52 @@ const createWalletRouter = ({ db, auth }) => {
           );
         }
 
-        if (order.inventoryFulfilled === true) {
+        const isAcceptedCod =
+          order.payment === "cod" && order.status === "accepted";
+
+        // Only an accepted COD order may be cancelled after stock was deducted.
+        if (order.inventoryFulfilled === true && !isAcceptedCod) {
           throw new Error(
             "This order can no longer be cancelled because inventory has already been fulfilled."
           );
         }
 
         const now = new Date();
+
+        let wallet = null;
+        let walletRef = null;
         let releasedReserve = 0;
 
         if (
-          order.payment === "cod" &&
-          order.status === "accepted" &&
+          isAcceptedCod &&
           order.codCommissionReservationStatus === "reserved"
         ) {
           const farmerId = String(order.farmerId);
-          const walletRef = db.collection("farmerWallets").doc(farmerId);
+
+          walletRef = db.collection("farmerWallets").doc(farmerId);
+
           const walletSnap = await transaction.get(walletRef);
 
-          const wallet = sanitizeWallet(
+          wallet = sanitizeWallet(
             farmerId,
             walletSnap.exists ? walletSnap.data() : {}
           );
 
           releasedReserve = roundMoney(order.codCommissionReserved);
+        }
 
+        let restockPlan = null;
+
+        if (isAcceptedCod && order.inventoryFulfilled === true) {
+          restockPlan = await planRestock(transaction, order);
+        }
+
+        // ---------- WRITES ----------
+        if (restockPlan) {
+          applyRestock(transaction, restockPlan);
+        }
+
+        if (wallet && releasedReserve > 0) {
           const nextReserve = roundMoney(
             wallet.commissionReserveBalance + releasedReserve
           );
@@ -1990,7 +2010,7 @@ const createWalletRouter = ({ db, auth }) => {
           );
 
           transaction.set(db.collection("walletTransactions").doc(), {
-            farmerId,
+            farmerId: String(order.farmerId),
             type: "cod_commission_reservation_released",
             direction: "credit",
             amount: releasedReserve,
@@ -2015,8 +2035,17 @@ const createWalletRouter = ({ db, auth }) => {
             order.payment === "gcash"
               ? "cancelled"
               : order.paymentStatus || "pending",
+
           inventoryFulfilled: false,
           fulfillmentStatus: "pending",
+          ...(restockPlan
+            ? {
+                inventoryRestoredAt: now,
+                // True only if some product had no batch trace to restore.
+                restockNeedsManualReview: restockPlan.skipped === true,
+              }
+            : {}),
+
           codCommissionReservationStatus:
             releasedReserve > 0
               ? "released"
@@ -2029,6 +2058,7 @@ const createWalletRouter = ({ db, auth }) => {
           orderId: orderSnap.id,
           cancelled: true,
           releasedCommissionReserve: releasedReserve,
+          stockRestored: !!restockPlan,
         };
       });
 
@@ -2524,25 +2554,48 @@ const createWalletRouter = ({ db, auth }) => {
           farmerEarning = roundMoney(Math.max(0, subtotal - commissionAmount));
           nextAvailable = roundMoney(wallet.availableBalance + farmerEarning);
         } else {
-          // COD: the commission is exactly what was reserved at acceptance.
           const reservedAmount = roundMoney(order.codCommissionReserved);
 
-          if (
-            order.codCommissionReservationStatus !== "reserved" ||
-            reservedAmount <= 0 ||
-            wallet.commissionReserveHeld + 0.001 < reservedAmount
-          ) {
-            throw new Error(
-              "COD commission reserve is not available for this order."
+          const hasReservation =
+            order.codCommissionReservationStatus === "reserved" &&
+            reservedAmount > 0;
+
+          if (hasReservation) {
+            // The commission is exactly what was reserved at acceptance.
+            // The order itself is the source of truth, so a short or
+            // corrupted held-pool never blocks (or double-charges) delivery.
+            commissionAmount = reservedAmount;
+
+            if (wallet.commissionReserveHeld + 0.001 < reservedAmount) {
+              console.warn(
+                "COD held reserve is lower than the order reservation (self-healing).",
+                {
+                  orderId,
+                  held: wallet.commissionReserveHeld,
+                  reservedAmount,
+                }
+              );
+            }
+
+            nextHeld = Math.max(
+              0,
+              roundMoney(wallet.commissionReserveHeld - reservedAmount)
             );
+          } else {
+            // Legacy order accepted before reservations existed (or already
+            // released): charge the commission now from the free reserve.
+            const due = roundMoney(subtotal * rate);
+
+            if (wallet.commissionReserveBalance + 0.001 < due) {
+              throw new Error(
+                `Insufficient commission reserve to settle this COD order. Required: ₱${due.toFixed(2)}. Available: ₱${wallet.commissionReserveBalance.toFixed(2)}. Please deposit to your commission reserve, then mark the order as delivered again.`
+              );
+            }
+
+            commissionAmount = due;
+
+            nextReserve = roundMoney(wallet.commissionReserveBalance - due);
           }
-
-          commissionAmount = reservedAmount;
-
-          nextHeld = Math.max(
-            0,
-            roundMoney(wallet.commissionReserveHeld - reservedAmount)
-          );
         }
 
         const isGcash = order.payment === "gcash";
