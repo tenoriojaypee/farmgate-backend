@@ -698,7 +698,9 @@ const payoutRequest = async ({
     user.street || user.location || user.barangay || ""
   ).trim();
 
-  if (!payoutCity || !payoutProvince || !payoutStreet) {
+  // Admin payouts supply their own address (addressOverride) and skip
+  // the farmer-profile check below.
+  if (!addressOverride && (!payoutCity || !payoutProvince || !payoutStreet)) {
     throw new Error(
       "Your farmer profile must have a complete address before a GCash payout can be sent."
     );
