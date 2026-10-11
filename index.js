@@ -57,7 +57,16 @@ const getCommissionRate = () => {
   return Number.isFinite(configured) && configured >= 0 ? configured : 0.03;
 };
 
-// Must match walletRoutes.js
+const {
+  computeDeliveryForOrder,
+  farmLocationFromProfile,
+  buyerLocationFromAddress,
+  quoteDeliveryFee,
+  DeliveryFeeError,
+} = require("./deliveryFee");
+
+// Legacy flat-fee fallback (kept ONLY for old orders with no barangay).
+// New orders always use barangay-level quoteDeliveryFee. Must match walletRoutes.js
 const getDeliveryFee = () => {
   const configured = Number(getEnv("FARMGATE_DELIVERY_FEE") || 35);
 
@@ -483,7 +492,30 @@ const validateOrderForPayment = async (orderRef) => {
       });
     }
 
-    const deliveryFee = order.delivery === "delivery" ? getDeliveryFee() : 0;
+    // ---- Barangay-level delivery fee (never trusts client fee/distance) ----
+    // Farm barangay from users/{farmerId}, buyer barangay from order.address.
+    // Legacy orders with no barangay keep the fee already written.
+    // Undeliverable addresses throw DeliveryFeeError -> order stays pending.
+    let deliveryFee = 0;
+    let distanceKm = 0;
+    let deliveryTier = null;
+
+    if (order.delivery === "delivery") {
+      const farmerRef = db.collection("users").doc(String(order.farmerId));
+      const farmerSnap = await transaction.get(farmerRef);
+      const farmerProfile = farmerSnap.exists ? farmerSnap.data() : {};
+      try {
+        const computed = computeDeliveryForOrder({ farmerProfile, order });
+        deliveryFee = computed.deliveryFee;
+        distanceKm = computed.distanceKm;
+        deliveryTier = computed.tier;
+      } catch (e) {
+        if (e?.name === "DeliveryFeeError") {
+          throw httpError(400, e.message);
+        }
+        throw e;
+      }
+    }
 
     const finalSubtotal = roundMoney(computedSubtotal);
     const finalTotal = roundMoney(finalSubtotal + deliveryFee);
@@ -506,6 +538,8 @@ const validateOrderForPayment = async (orderRef) => {
       products: validatedProducts,
       subTotal: finalSubtotal,
       deliveryFee,
+      distanceKm: distanceKm ?? null,
+      deliveryTier: deliveryTier ?? null,
       total: finalTotal,
 
       commissionRate,
@@ -530,6 +564,8 @@ const validateOrderForPayment = async (orderRef) => {
       total: finalTotal,
       subtotal: finalSubtotal,
       deliveryFee,
+      distanceKm: distanceKm ?? null,
+      deliveryTier: deliveryTier ?? null,
       products: validatedProducts,
     };
   });
@@ -1040,6 +1076,80 @@ app.get("/health", (req, res) => {
     xenditWebhook: !!getEnv("XENDIT_WEBHOOK_TOKEN"),
     firebase: !!getEnv("FIREBASE_PROJECT_ID"),
   });
+});
+
+/* =========================================================
+   DELIVERY QUOTE (authoritative, Bulacan barangay-level)
+   POST /delivery/quote { farmerId, address: {province,city,barangay}, delivery? }
+   - Farm barangay is read from users/{farmerId}, never from the client.
+   - Buyer barangay comes from the address object (order address at checkout).
+   - Client fee/distance preview is never trusted; callers must use this.
+   ========================================================= */
+
+app.post("/delivery/quote", async (req, res) => {
+  try {
+    await verifyFirebaseUser(req);
+
+    const farmerId = String(req.body?.farmerId || "").trim();
+    const address = req.body?.address || null;
+    const delivery = req.body?.delivery || "delivery";
+
+    if (!farmerId) {
+      return res.status(400).json({ success: false, error: "Missing farmerId." });
+    }
+    if (delivery !== "delivery") {
+      return res.json({
+        success: true,
+        deliveryFee: 0,
+        distanceKm: 0,
+        tier: null,
+      });
+    }
+    if (!address || !address.city || !address.barangay) {
+      return res.status(400).json({
+        success: false,
+        error: "Pick a delivery City and Barangay first.",
+      });
+    }
+
+    const farmerSnap = await db.collection("users").doc(farmerId).get();
+    if (!farmerSnap.exists) {
+      return res.status(404).json({ success: false, error: "Farm not found." });
+    }
+    const farm = farmLocationFromProfile(farmerSnap.data() || {});
+    const buyer = buyerLocationFromAddress(address);
+
+    if (!String(farm.city || "").trim() || !String(farm.barangay || "").trim()) {
+      return res.status(400).json({
+        success: false,
+        code: "FARM_MISSING_BARANGAY",
+        error:
+          "This farm has no barangay set yet. Ask the farmer to pick their City and Barangay in Farm Profile before delivery.",
+      });
+    }
+
+    try {
+      const q = quoteDeliveryFee(farm, buyer);
+      return res.json({
+        success: true,
+        deliveryFee: q.fee,
+        distanceKm: q.distanceKm,
+        tier: q.tier,
+      });
+    } catch (e) {
+      return res.status(400).json({
+        success: false,
+        error: e.message,
+        ...(e?.code ? { code: e.code } : {}),
+      });
+    }
+  } catch (error) {
+    console.error("DELIVERY QUOTE ERROR:", error);
+    return res.status(error.status || 500).json({
+      success: false,
+      error: error.message || "Unable to quote delivery.",
+    });
+  }
 });
 
 /* =========================================================

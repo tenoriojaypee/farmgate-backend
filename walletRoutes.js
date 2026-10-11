@@ -2302,8 +2302,29 @@ const createWalletRouter = ({ db, auth, inventory }) => {
             completedAt: now,
           });
         } else {
-          // Provisional; recomputed from server prices when payment is created.
+          // GCash: provisional totals. The authoritative re-price happens in
+          // /create-payment (validateOrderForPayment). Still, the delivery
+          // address must be validated NOW so out-of-Bulacan orders are blocked
+          // at accept and the order stays pending with a clear error.
           commissionAmount = roundMoney(getOrderSubtotal(order) * rate);
+          if (order.delivery === "delivery") {
+            const farmerSnap = await transaction.get(
+              db.collection("users").doc(String(order.farmerId))
+            );
+            const farmerProfile = farmerSnap.exists ? farmerSnap.data() : {};
+            // Throws DeliveryFeeError when undeliverable -> transaction aborts,
+            // order stays pending, caller returns 400 with the message.
+            const dq = computeDeliveryForOrder({ farmerProfile, order });
+            pricing = {
+              products: order.products,
+              subtotal: getOrderSubtotal(order),
+              deliveryFee: dq.deliveryFee,
+              distanceKm: dq.distanceKm,
+              deliveryTier: dq.tier,
+              deliveryLegacy: dq.legacy === true,
+              total: roundMoney(getOrderSubtotal(order) + dq.deliveryFee),
+            };
+          }
         }
 
         transaction.update(orderRef, {
@@ -2314,18 +2335,30 @@ const createWalletRouter = ({ db, auth, inventory }) => {
           paymentStatus: order.paymentStatus || "pending",
 
           ...(pricing
-            ? {
-                products: inventoryPlan.updatedProducts,
-                subTotal: pricing.subtotal,
-                deliveryFee: pricing.deliveryFee,
-                total: pricing.total,
-                serverValidated: true,
-                serverValidatedAt: now,
+            ? order.payment === "cod"
+              ? {
+                  products: inventoryPlan.updatedProducts,
+                  subTotal: pricing.subtotal,
+                  deliveryFee: pricing.deliveryFee,
+                  distanceKm: pricing.distanceKm ?? null,
+                  deliveryTier: pricing.deliveryTier ?? null,
+                  total: pricing.total,
+                  serverValidated: true,
+                  serverValidatedAt: now,
 
-                inventoryFulfilled: true,
-                fulfillmentStatus: "fulfilled",
-                inventoryFulfilledAt: now,
-              }
+                  inventoryFulfilled: true,
+                  fulfillmentStatus: "fulfilled",
+                  inventoryFulfilledAt: now,
+                }
+              : {
+                  // GCash provisional delivery quote (authoritative at payment).
+                  deliveryFee: pricing.deliveryFee,
+                  distanceKm: pricing.distanceKm ?? null,
+                  deliveryTier: pricing.deliveryTier ?? null,
+                  total: pricing.total,
+                  inventoryFulfilled: false,
+                  fulfillmentStatus: "pending",
+                }
             : {
                 inventoryFulfilled: false,
                 fulfillmentStatus: "pending",
@@ -2355,9 +2388,90 @@ const createWalletRouter = ({ db, auth, inventory }) => {
     } catch (error) {
       console.error("ACCEPT ORDER ERROR:", error);
 
+      // DeliveryFeeError keeps the order pending with a clear, actionable message.
       return res
         .status(error.code === "STOCK_UNAVAILABLE" ? 409 : 400)
-        .json({ success: false, error: error.message });
+        .json({
+          success: false,
+          error: error.message,
+          ...(error?.name === "DeliveryFeeError" && error?.code
+            ? { code: error.code }
+            : {}),
+        });
+    }
+  });
+
+  // ------------------------------------------------------------
+  // DELIVERY QUOTE (authoritative preview, never trusts client fee/distance)
+  // POST /wallet/delivery/quote { farmerId, address: {province,city,barangay}, delivery? }
+  // Farm barangay is read from users/{farmerId}; buyer barangay from address.
+  // ------------------------------------------------------------
+  router.post("/delivery/quote", async (req, res) => {
+    try {
+      await getAuthUser(req, auth);
+
+      const farmerId = String(req.body?.farmerId || "").trim();
+      const address = req.body?.address || null;
+      const delivery = req.body?.delivery || "delivery";
+
+      if (!farmerId) {
+        return res.status(400).json({ success: false, error: "Missing farmerId." });
+      }
+      if (delivery !== "delivery") {
+        return res.json({
+          success: true,
+          deliveryFee: 0,
+          distanceKm: 0,
+          tier: null,
+          total: null,
+        });
+      }
+      if (!address || !address.city || !address.barangay) {
+        return res.status(400).json({
+          success: false,
+          error: "Pick a delivery City and Barangay first.",
+        });
+      }
+
+      const farmerSnap = await db.collection("users").doc(farmerId).get();
+      if (!farmerSnap.exists) {
+        return res.status(404).json({ success: false, error: "Farm not found." });
+      }
+      const { farmLocationFromProfile, buyerLocationFromAddress, quoteDeliveryFee } =
+        require("./deliveryFee");
+      const farm = farmLocationFromProfile(farmerSnap.data() || {});
+      const buyer = buyerLocationFromAddress(address);
+
+      if (!String(farm.city || "").trim() || !String(farm.barangay || "").trim()) {
+        return res.status(400).json({
+          success: false,
+          code: "FARM_MISSING_BARANGAY",
+          error:
+            "This farm has no barangay set yet. Ask the farmer to pick their City and Barangay in Farm Profile before delivery.",
+        });
+      }
+
+      try {
+        const q = quoteDeliveryFee(farm, buyer);
+        return res.json({
+          success: true,
+          deliveryFee: q.fee,
+          distanceKm: q.distanceKm,
+          tier: q.tier,
+        });
+      } catch (e) {
+        return res.status(400).json({
+          success: false,
+          error: e.message,
+          ...(e?.code ? { code: e.code } : {}),
+        });
+      }
+    } catch (error) {
+      console.error("DELIVERY QUOTE ERROR:", error);
+      return res.status(error.status || 400).json({
+        success: false,
+        error: error.message || "Unable to quote delivery.",
+      });
     }
   });
 
@@ -3878,5 +3992,6 @@ module.exports = {
   handleCommissionDepositWebhook,
   getWithdrawableAmount,
   getCommissionRate,
+  // Exported for unit tests (no logic change to /deliver settlement).
+  _test: { priceOrderOnServer, getOrderSubtotal, roundMoney, sanitizeWallet },
 };
-
