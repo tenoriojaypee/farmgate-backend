@@ -45,6 +45,7 @@ const VERIFIED = {
   "Hagonoy|San Agustin": [14.8412, 120.742],
   "Calumpit|Poblacion": [14.9172, 120.7669],
   "Meycauayan|Poblacion": [14.7333, 120.95],
+  "Meycauayan|Ubihan": [14.7533, 120.9229], // OSM boundary relation 1710785 (bbox-verified village in Meycauayan); field-verify before production reliance
   "Baliwag|Poblacion": [14.9547, 120.8967],
   "San Jose del Monte|Poblacion": [14.8139, 121.0453],
 };
