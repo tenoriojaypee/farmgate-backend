@@ -210,10 +210,14 @@ const getAuthUser = async (req, auth) => {
     typeof authorization !== "string" ||
     !authorization.startsWith("Bearer ")
   ) {
-    throw new Error("Missing Firebase authentication token.");
+    throw httpError(401, "Missing Firebase authentication token.");
   }
 
-  return await auth.verifyIdToken(authorization.substring("Bearer ".length));
+  try {
+    return await auth.verifyIdToken(authorization.substring("Bearer ".length));
+  } catch {
+    throw httpError(401, "Invalid or expired login session.");
+  }
 };
 
 const requireFarmer = async (req, auth, db) => {
@@ -221,16 +225,78 @@ const requireFarmer = async (req, auth, db) => {
   const userSnap = await db.collection("users").doc(decoded.uid).get();
 
   if (!userSnap.exists) {
-    throw new Error("User profile not found.");
+    throw httpError(404, "User profile not found.");
   }
 
   const user = userSnap.data() || {};
 
   if (user.role !== "farmer") {
-    throw new Error("Only farmer accounts can access this wallet.");
+    throw httpError(403, "Only farmer accounts can access this wallet.");
   }
 
   return { decoded, user };
+};
+
+/* Single shared admin wallet: one document serves the one admin account,
+   so the balance survives admin account changes. */
+const ADMIN_WALLET_ID = "main";
+const ADMIN_PAYOUT_ID = "main";
+
+const requireAdmin = async (req, auth, db) => {
+  const decoded = await getAuthUser(req, auth);
+
+  const adminSnap = await db.collection("admins").doc(decoded.uid).get();
+  if (adminSnap.exists && (adminSnap.data() || {}).status === "Active") {
+    return { decoded };
+  }
+
+  const userSnap = await db.collection("users").doc(decoded.uid).get();
+  if (userSnap.exists && (userSnap.data() || {}).role === "admin") {
+    return { decoded };
+  }
+
+  throw httpError(403, "Only admin accounts can access this wallet.");
+};
+
+const sanitizeAdminWallet = (data = {}) => ({
+  availableBalance: roundMoney(data.availableBalance),
+  totalCommissionEarned: roundMoney(data.totalCommissionEarned),
+  totalWithdrawn: roundMoney(data.totalWithdrawn),
+  pendingWithdrawal: roundMoney(data.pendingWithdrawal),
+  updatedAt: data.updatedAt || null,
+});
+
+const getAdminWithdrawableAmount = (wallet) =>
+  Math.max(
+    0,
+    roundMoney(
+      roundMoney(wallet.availableBalance) -
+        roundMoney(wallet.pendingWithdrawal)
+    )
+  );
+
+// Auth problems -> 401/403/404. Everything else -> fallback (usually 500,
+// so a Firestore/Xendit failure is never misreported as "session expired").
+const sendWalletError = (res, error, fallbackStatus = 500) => {
+  const status =
+    Number.isFinite(Number(error?.status)) && Number(error.status) >= 400
+      ? Number(error.status)
+      : fallbackStatus;
+
+  return res.status(status).json({ success: false, error: error.message });
+};
+
+// Never throws: a corrupt/legacy payout doc must not break the whole wallet.
+const safeMaskGcashNumber = (storedMasked, storedNumber) => {
+  if (typeof storedMasked === "string" && storedMasked.trim() !== "") {
+    return storedMasked;
+  }
+
+  try {
+    return maskGcashNumber(storedNumber || "");
+  } catch {
+    return "";
+  }
 };
 
 /* =========================================================
@@ -414,17 +480,20 @@ const priceOrderOnServer = async (transaction, db, order) => {
   };
 };
 
-const getPendingProductBalance = async (db, farmerId) => {
-  const snapshot = await db
-    .collection("orders")
-    .where("farmerId", "==", farmerId)
-    .get();
+const PENDING_ORDER_STATUSES = ["accepted", "processing", "to_receive"];
 
-  const pendingStatuses = new Set(["accepted", "processing", "to_receive"]);
+const isIndexMissingError = (error) => {
+  if (!error) return false;
+  if (error?.code === 9 || error?.code === "failed-precondition") return true;
+  const msg = String(error?.message || "").toLowerCase();
+  return msg.includes("composite index") || msg.includes("requires an index");
+};
 
+const sumPendingFromDocs = (docs) => {
+  const pendingStatuses = new Set(PENDING_ORDER_STATUSES);
   let total = 0;
 
-  for (const docSnap of snapshot.docs) {
+  for (const docSnap of docs) {
     const order = docSnap.data() || {};
 
     if (!pendingStatuses.has(String(order.status || ""))) continue;
@@ -442,6 +511,56 @@ const getPendingProductBalance = async (db, farmerId) => {
   }
 
   return roundMoney(total);
+};
+
+const getPendingProductBalance = async (db, farmerId) => {
+  // Fast path: only pending statuses, only the fields needed for pricing.
+  // Needs composite index: farmerId ASC + status ASC. Falls back below.
+  try {
+    const snapshot = await db
+      .collection("orders")
+      .where("farmerId", "==", farmerId)
+      .where("status", "in", PENDING_ORDER_STATUSES)
+      .select(
+        "status",
+        "payment",
+        "paymentStatus",
+        "financialStatus",
+        "farmerWalletCredited",
+        "deliveredAt",
+        "subTotal",
+        "products"
+      )
+      .get();
+
+    return sumPendingFromDocs(snapshot.docs);
+  } catch (error) {
+    if (!isIndexMissingError(error)) throw error;
+
+    console.warn(
+      "orders needs a composite index (farmerId ASC, status ASC). Using full-scan fallback for pending balance.",
+      error.message
+    );
+  }
+
+  // Fallback for projects without the composite index yet.
+  // select() keeps the payload small so this stays fast.
+  const snapshot = await db
+    .collection("orders")
+    .where("farmerId", "==", farmerId)
+    .select(
+      "status",
+      "payment",
+      "paymentStatus",
+      "financialStatus",
+      "farmerWalletCredited",
+      "deliveredAt",
+      "subTotal",
+      "products"
+    )
+    .get();
+
+  return sumPendingFromDocs(snapshot.docs);
 };
 
 /* =========================================================
@@ -608,6 +727,48 @@ const payoutRequest = async ({
   }
 
   throw lastError;
+};
+
+/* Admin payout: same Xendit call as farmers, but the address comes from
+   adminPayoutAccount/main (admins have no profile address fields). */
+const adminPayoutRequest = async ({
+  idempotencyKey,
+  referenceId,
+  payoutAccount,
+  amount,
+}) => {
+  const accountName = String(payoutAccount.accountName || "").trim();
+  const postalCode = String(payoutAccount.postalCode || "").trim();
+  const payoutCity = String(payoutAccount.city || "").trim();
+  const payoutProvince = String(payoutAccount.province || "").trim();
+  const payoutStreet = String(payoutAccount.street || "").trim();
+
+  if (!payoutCity || !payoutProvince || !payoutStreet) {
+    throw new Error(
+      "The admin payout account needs a complete address (street, city, province) before a GCash payout can be sent."
+    );
+  }
+
+  if (!/^\d{4}$/.test(postalCode)) {
+    throw new Error(
+      "The admin payout account must have a valid 4-digit postal code before a GCash payout can be sent."
+    );
+  }
+
+  return payoutRequest({
+    idempotencyKey,
+    referenceId,
+    accountName,
+    accountNumber: payoutAccount.accountNumber,
+    amount,
+    user: {
+      farmerId: `admin-${ADMIN_WALLET_ID}`,
+      payoutPostalCode: postalCode,
+      city: payoutCity,
+      province: payoutProvince,
+      street: payoutStreet,
+    },
+  });
 };
 
 /* =========================================================
@@ -909,6 +1070,258 @@ const applyWithdrawalWebhook = async ({ db, withdrawalDoc, data, event }) => {
   });
 };
 
+const findAdminWithdrawal = async ({ db, payoutId, referenceId }) => {
+  if (payoutId) {
+    const query = await db
+      .collection("adminWithdrawals")
+      .where("xenditPayoutId", "==", String(payoutId))
+      .limit(1)
+      .get();
+
+    if (!query.empty)
+      return { doc: query.docs[0], isAdmin: true };
+  }
+
+  if (referenceId) {
+    const query = await db
+      .collection("adminWithdrawals")
+      .where("xenditReferenceId", "==", String(referenceId))
+      .limit(1)
+      .get();
+
+    if (!query.empty)
+      return { doc: query.docs[0], isAdmin: true };
+  }
+
+  return null;
+};
+
+/* Admin mirror of applyWithdrawalWebhook. Same state machine, but the
+   hold field is pendingWithdrawal and the ledger is adminWalletTransactions.
+   Terminal states are final so a retry can never double-release/double-pay. */
+const applyAdminWithdrawalWebhook = async ({ db, withdrawalDoc, data, event }) => {
+  const withdrawalRef = withdrawalDoc.ref;
+  const initialWithdrawal = withdrawalDoc.data() || {};
+  const amount = roundMoney(initialWithdrawal.amount);
+
+  if (amount <= 0) return;
+
+  const walletRef = db.collection("adminWallets").doc(ADMIN_WALLET_ID);
+
+  await db.runTransaction(async (transaction) => {
+    const [withdrawalSnap, walletSnap] = await Promise.all([
+      transaction.get(withdrawalRef),
+      transaction.get(walletRef),
+    ]);
+
+    if (!withdrawalSnap.exists) return;
+
+    const withdrawal = withdrawalSnap.data() || {};
+    const wallet = sanitizeAdminWallet(
+      walletSnap.exists ? walletSnap.data() : {}
+    );
+
+    const now = new Date();
+    const status = String(data?.status || "").toUpperCase();
+    const currentStatus = String(withdrawal.status || "");
+
+    const reversed = event === "v3_payout.reversed" || status === "REVERSED";
+
+    const finalFailure =
+      !reversed &&
+      (event === "v3_payout.failed" ||
+        event === "v3_payout.rejected" ||
+        status === "FAILED" ||
+        status === "REJECTED");
+
+    const succeeded =
+      !reversed &&
+      !finalFailure &&
+      (event === "v3_payout.succeeded" || status === "SUCCEEDED");
+
+    if (["failed", "rejected", "reversed"].includes(currentStatus)) return;
+    if (currentStatus === "succeeded" && !reversed) return;
+
+    const gatewayFields = {
+      xenditPayoutId: data?.payout_id || withdrawal.xenditPayoutId || null,
+      xenditReferenceId:
+        data?.reference_id || withdrawal.xenditReferenceId || null,
+      xenditStatus: data?.status || null,
+    };
+
+    if (reversed) {
+      if (currentStatus === "succeeded") {
+        const nextAvailable = roundMoney(wallet.availableBalance + amount);
+        transaction.set(
+          walletRef,
+          {
+            ...wallet,
+            availableBalance: nextAvailable,
+            totalWithdrawn: Math.max(
+              0,
+              roundMoney(wallet.totalWithdrawn - amount)
+            ),
+            updatedAt: now,
+          },
+          { merge: true }
+        );
+        transaction.set(db.collection("adminWalletTransactions").doc(), {
+          type: "withdrawal_reversal",
+          direction: "credit",
+          amount,
+          balanceAfter: nextAvailable,
+          reference: withdrawal.xenditReferenceId || withdrawalDoc.id,
+          withdrawalId: withdrawalDoc.id,
+          status: "completed",
+          description:
+            "Xendit reversed the admin GCash payout; the amount was returned.",
+          createdAt: now,
+          completedAt: now,
+        });
+      } else {
+        transaction.set(
+          walletRef,
+          {
+            ...wallet,
+            pendingWithdrawal: Math.max(
+              0,
+              roundMoney(wallet.pendingWithdrawal - amount)
+            ),
+            updatedAt: now,
+          },
+          { merge: true }
+        );
+      }
+      if (withdrawal.walletTransactionId) {
+        transaction.set(
+          db.collection("adminWalletTransactions").doc(withdrawal.walletTransactionId),
+          {
+            status: "reversed",
+            completedAt: now,
+            description: "Admin GCash withdrawal reversed.",
+          },
+          { merge: true }
+        );
+      }
+      transaction.set(
+        withdrawalRef,
+        {
+          status: "reversed",
+          ...gatewayFields,
+          failureCode: data?.failure_code || null,
+          failureReason: data?.failure_reason || null,
+          failedAt: now,
+          completedAt: now,
+          updatedAt: now,
+        },
+        { merge: true }
+      );
+      return;
+    }
+
+    if (finalFailure) {
+      transaction.set(
+        walletRef,
+        {
+          ...wallet,
+          pendingWithdrawal: Math.max(
+            0,
+            roundMoney(wallet.pendingWithdrawal - amount)
+          ),
+          updatedAt: now,
+        },
+        { merge: true }
+      );
+      if (withdrawal.walletTransactionId) {
+        transaction.set(
+          db.collection("adminWalletTransactions").doc(withdrawal.walletTransactionId),
+          {
+            status: "failed",
+            completedAt: now,
+            description:
+              "Admin GCash withdrawal failed/rejected; held amount released.",
+          },
+          { merge: true }
+        );
+      }
+      transaction.set(
+        withdrawalRef,
+        {
+          status: status === "REJECTED" ? "rejected" : "failed",
+          ...gatewayFields,
+          failureCode: data?.failure_code || null,
+          failureReason: data?.failure_reason || null,
+          failedAt: now,
+          updatedAt: now,
+        },
+        { merge: true }
+      );
+      return;
+    }
+
+    if (succeeded) {
+      const nextPending = Math.max(
+        0,
+        roundMoney(wallet.pendingWithdrawal - amount)
+      );
+      const nextAvailable = Math.max(
+        0,
+        roundMoney(wallet.availableBalance - amount)
+      );
+      transaction.set(
+        walletRef,
+        {
+          ...wallet,
+          availableBalance: nextAvailable,
+          pendingWithdrawal: nextPending,
+          totalWithdrawn: roundMoney(wallet.totalWithdrawn + amount),
+          updatedAt: now,
+        },
+        { merge: true }
+      );
+      transaction.set(
+        withdrawalRef,
+        {
+          status: "succeeded",
+          ...gatewayFields,
+          completedAt: now,
+          updatedAt: now,
+        },
+        { merge: true }
+      );
+      if (withdrawal.walletTransactionId) {
+        transaction.set(
+          db.collection("adminWalletTransactions").doc(withdrawal.walletTransactionId),
+          {
+            status: "completed",
+            balanceAfter: nextAvailable,
+            completedAt: now,
+            description: "Admin GCash withdrawal completed.",
+          },
+          { merge: true }
+        );
+      }
+      return;
+    }
+
+    const nextStatus =
+      event === "v3_payout.pending_compliance" ||
+      status === "PENDING_COMPLIANCE_REVIEW"
+        ? "pending_compliance"
+        : "processing";
+    transaction.set(
+      withdrawalRef,
+      {
+        status: nextStatus,
+        ...gatewayFields,
+        processingAt: withdrawal.processingAt || now,
+        updatedAt: now,
+      },
+      { merge: true }
+    );
+  });
+};
+
 /* =========================================================
    COMMISSION DEPOSIT WEBHOOK
 ========================================================= */
@@ -1190,19 +1603,47 @@ const createWalletRouter = ({ db, auth, inventory }) => {
 
       return mapDocs(snapshot);
     } catch (error) {
-      if (error?.code !== 9) throw error; // 9 = FAILED_PRECONDITION (index missing)
+      if (!isIndexMissingError(error)) throw error;
 
       console.warn(
-        "walletTransactions needs a composite index (farmerId ASC, createdAt DESC). Using in-memory fallback.",
+        "walletTransactions needs a composite index (farmerId ASC, createdAt DESC). Using bounded fallback.",
         error.message
       );
 
-      const snapshot = await base.get();
+      // Bounded fallback: never pull the whole history. Over-fetch a bit,
+      // sort in memory, then cut to the page size.
+      const snapshot = await base.limit(TRANSACTION_LIMIT * 4).get();
 
       return mapDocs(snapshot)
         .sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt))
         .slice(0, TRANSACTION_LIMIT);
     }
+  };
+
+  const loadPayoutAccount = async (farmerId) => {
+    const snap = await db
+      .collection("farmerPayoutAccounts")
+      .doc(farmerId)
+      .get();
+
+    if (!snap.exists) return null;
+
+    const data = snap.data() || {};
+
+    return {
+      farmerId,
+      method: "gcash",
+      channel: "PH_GCASH",
+      accountName: data.accountName || "",
+      postalCode: data.postalCode || "",
+      accountNumberMasked: safeMaskGcashNumber(
+        data.accountNumberMasked,
+        data.accountNumber
+      ),
+      status: data.status || "active",
+      createdAt: data.createdAt || null,
+      updatedAt: data.updatedAt || null,
+    };
   };
 
   // ------------------------------------------------------------
@@ -1236,7 +1677,53 @@ const createWalletRouter = ({ db, auth, inventory }) => {
     } catch (error) {
       console.error("GET FARMER WALLET ERROR:", error);
 
-      return res.status(401).json({ success: false, error: error.message });
+      return sendWalletError(res, error, 500);
+    }
+  });
+
+  // ------------------------------------------------------------
+  // GET WALLET OVERVIEW (single roundtrip for the mobile wallet
+  // screen: 1 auth check, then wallet + payout + history in parallel)
+  // ------------------------------------------------------------
+  router.get("/overview", async (req, res) => {
+    try {
+      const { decoded } = await requireFarmer(req, auth, db);
+      const farmerId = decoded.uid;
+
+      const walletRef = db.collection("farmerWallets").doc(farmerId);
+
+      const [walletSnap, payoutAccount, transactions] = await Promise.all([
+        walletRef.get(),
+        loadPayoutAccount(farmerId),
+        loadFarmerTransactions(farmerId),
+      ]);
+
+      const wallet = sanitizeWallet(
+        farmerId,
+        walletSnap.exists ? walletSnap.data() : {}
+      );
+
+      if (!walletSnap.exists) {
+        await walletRef.set({
+          ...wallet,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        });
+      }
+
+      return res.json({
+        success: true,
+        wallet,
+        payoutAccount,
+        transactions,
+        withdrawableAmount: getWithdrawableAmount(wallet),
+        minimumCommissionDeposit: getMinimumCommissionDeposit(),
+        minimumWithdrawal: getMinimumWithdrawal(),
+      });
+    } catch (error) {
+      console.error("GET WALLET OVERVIEW ERROR:", error);
+
+      return sendWalletError(res, error, 500);
     }
   });
 
@@ -1252,6 +1739,8 @@ const createWalletRouter = ({ db, auth, inventory }) => {
       return res.json({ success: true, pendingBalance });
     } catch (error) {
       console.error("GET PENDING GCASH EARNINGS ERROR:", error);
+
+      if (error?.status) return sendWalletError(res, error, 400);
 
       return res.status(400).json({
         success: false,
@@ -1273,7 +1762,7 @@ const createWalletRouter = ({ db, auth, inventory }) => {
     } catch (error) {
       console.error("GET WALLET TRANSACTIONS ERROR:", error);
 
-      return res.status(401).json({ success: false, error: error.message });
+      return sendWalletError(res, error, 500);
     }
   });
 
@@ -1284,37 +1773,13 @@ const createWalletRouter = ({ db, auth, inventory }) => {
     try {
       const { decoded } = await requireFarmer(req, auth, db);
 
-      const snap = await db
-        .collection("farmerPayoutAccounts")
-        .doc(decoded.uid)
-        .get();
+      const payoutAccount = await loadPayoutAccount(decoded.uid);
 
-      if (!snap.exists) {
-        return res.json({ success: true, payoutAccount: null });
-      }
-
-      const data = snap.data() || {};
-
-      return res.json({
-        success: true,
-        payoutAccount: {
-          farmerId: decoded.uid,
-          method: "gcash",
-          channel: "PH_GCASH",
-          accountName: data.accountName || "",
-          postalCode: data.postalCode || "",
-          accountNumberMasked:
-            data.accountNumberMasked ||
-            maskGcashNumber(data.accountNumber || ""),
-          status: data.status || "active",
-          createdAt: data.createdAt || null,
-          updatedAt: data.updatedAt || null,
-        },
-      });
+      return res.json({ success: true, payoutAccount });
     } catch (error) {
       console.error("GET PAYOUT ACCOUNT ERROR:", error);
 
-      return res.status(401).json({ success: false, error: error.message });
+      return sendWalletError(res, error, 500);
     }
   });
 
@@ -2490,13 +2955,15 @@ const createWalletRouter = ({ db, auth, inventory }) => {
       const orderId = String(req.params.orderId);
       const orderRef = db.collection("orders").doc(orderId);
       const walletRef = db.collection("farmerWallets").doc(decoded.uid);
+      const adminWalletRef = db.collection("adminWallets").doc(ADMIN_WALLET_ID);
 
       let settlementResult = null;
 
       await db.runTransaction(async (transaction) => {
-        const [orderSnap, walletSnap] = await Promise.all([
+        const [orderSnap, walletSnap, adminWalletSnap] = await Promise.all([
           transaction.get(orderRef),
           transaction.get(walletRef),
+          transaction.get(adminWalletRef),
         ]);
 
         if (!orderSnap.exists) throw new Error("Order not found.");
@@ -2679,6 +3146,41 @@ const createWalletRouter = ({ db, auth, inventory }) => {
           { merge: true }
         );
 
+        // Single shared admin wallet: same transaction, so the balance
+        // can never drift from the order/commission records.
+        const adminWallet = sanitizeAdminWallet(
+          adminWalletSnap.exists ? adminWalletSnap.data() : {}
+        );
+        const nextAdminAvailable = roundMoney(
+          adminWallet.availableBalance + commissionAmount
+        );
+        transaction.set(
+          adminWalletRef,
+          {
+            ...adminWallet,
+            availableBalance: nextAdminAvailable,
+            totalCommissionEarned: roundMoney(
+              adminWallet.totalCommissionEarned + commissionAmount
+            ),
+            updatedAt: now,
+          },
+          { merge: true }
+        );
+        transaction.set(db.collection("adminWalletTransactions").doc(), {
+          type: "commission_credit",
+          direction: "credit",
+          amount: commissionAmount,
+          balanceAfter: nextAdminAvailable,
+          reference: order.orderNumber || orderId,
+          orderId,
+          orderNumber: order.orderNumber || null,
+          farmerId: decoded.uid,
+          status: "completed",
+          description: `Commission from order ${order.orderNumber || orderId}.`,
+          createdAt: now,
+          completedAt: now,
+        });
+
         transaction.update(orderRef, {
           status: "delivered",
           deliveredAt: now,
@@ -2724,16 +3226,7 @@ const createWalletRouter = ({ db, auth, inventory }) => {
   // ------------------------------------------------------------
   router.get("/admin/financial-summary", async (req, res) => {
     try {
-      const decoded = await getAuthUser(req, auth);
-
-      const userSnap = await db.collection("users").doc(decoded.uid).get();
-
-      if (!userSnap.exists || userSnap.data()?.role !== "admin") {
-        return res.status(403).json({
-          success: false,
-          error: "Only admin accounts can view FarmGate financial summary.",
-        });
-      }
+      await requireAdmin(req, auth, db);
 
       const summarySnap = await db
         .collection("farmgateFinancialSummary")
@@ -2758,9 +3251,494 @@ const createWalletRouter = ({ db, auth, inventory }) => {
     } catch (error) {
       console.error("GET FARMGATE FINANCIAL SUMMARY ERROR:", error);
 
-      return res.status(500).json({
+      return res.status(error.status || 500).json({
         success: false,
         error: error.message || "Failed to load FarmGate financial summary.",
+      });
+    }
+  });
+
+  // ------------------------------------------------------------
+  // ADMIN WALLET (single shared wallet: adminWallets/main)
+  // ------------------------------------------------------------
+  router.get("/admin/wallet", async (req, res) => {
+    try {
+      await requireAdmin(req, auth, db);
+
+      const ref = db.collection("adminWallets").doc(ADMIN_WALLET_ID);
+      const snap = await ref.get();
+      const wallet = sanitizeAdminWallet(snap.exists ? snap.data() : {});
+
+      if (!snap.exists) {
+        await ref.set({
+          ...wallet,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        });
+      }
+
+      return res.json({
+        success: true,
+        wallet,
+        withdrawableAmount: getAdminWithdrawableAmount(wallet),
+        minimumWithdrawal: getMinimumWithdrawal(),
+      });
+    } catch (error) {
+      console.error("GET ADMIN WALLET ERROR:", error);
+
+      return res.status(error.status || 500).json({
+        success: false,
+        error: error.message,
+      });
+    }
+  });
+
+  router.get("/admin/transactions", async (req, res) => {
+    try {
+      await requireAdmin(req, auth, db);
+
+      const base = db.collection("adminWalletTransactions");
+      const mapDocs = (snapshot) =>
+        snapshot.docs.map((docSnap) => ({ id: docSnap.id, ...docSnap.data() }));
+
+      try {
+        const snapshot = await base
+          .orderBy("createdAt", "desc")
+          .limit(TRANSACTION_LIMIT)
+          .get();
+
+        return res.json({ success: true, transactions: mapDocs(snapshot) });
+      } catch (error) {
+        if (error?.code !== 9) throw error;
+
+        const snapshot = await base.limit(TRANSACTION_LIMIT * 4).get();
+
+        return res.json({
+          success: true,
+          transactions: mapDocs(snapshot)
+            .sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt))
+            .slice(0, TRANSACTION_LIMIT),
+        });
+      }
+    } catch (error) {
+      console.error("GET ADMIN TRANSACTIONS ERROR:", error);
+
+      return res.status(error.status || 500).json({
+        success: false,
+        error: error.message,
+      });
+    }
+  });
+
+  router.get("/admin/payout-account", async (req, res) => {
+    try {
+      await requireAdmin(req, auth, db);
+
+      const snap = await db
+        .collection("adminPayoutAccount")
+        .doc(ADMIN_PAYOUT_ID)
+        .get();
+
+      if (!snap.exists) {
+        return res.json({ success: true, payoutAccount: null });
+      }
+
+      const data = snap.data() || {};
+
+      return res.json({
+        success: true,
+        payoutAccount: {
+          method: "gcash",
+          channel: "PH_GCASH",
+          accountName: data.accountName || "",
+          postalCode: data.postalCode || "",
+          city: data.city || "",
+          province: data.province || "",
+          street: data.street || "",
+          accountNumberMasked: safeMaskGcashNumber(
+            data.accountNumberMasked,
+            data.accountNumber
+          ),
+          status: data.status || "active",
+          createdAt: data.createdAt || null,
+          updatedAt: data.updatedAt || null,
+        },
+      });
+    } catch (error) {
+      console.error("GET ADMIN PAYOUT ACCOUNT ERROR:", error);
+
+      return res.status(error.status || 500).json({
+        success: false,
+        error: error.message,
+      });
+    }
+  });
+
+  router.put("/admin/payout-account", async (req, res) => {
+    try {
+      await requireAdmin(req, auth, db);
+
+      const accountName = String(req.body?.accountName || "").trim();
+      const accountNumber = normalizeGcashNumber(req.body?.accountNumber);
+
+      // Address fields are optional here (the UI only asks for name +
+      // number). When provided they are stored; otherwise the stored
+      // values are left untouched. Xendit still needs a complete
+      // address at withdraw time (see adminPayoutRequest).
+      const postalCode = String(req.body?.postalCode ?? "").trim();
+      const city = String(req.body?.city ?? "").trim();
+      const province = String(req.body?.province ?? "").trim();
+      const street = String(req.body?.street ?? "").trim();
+
+      if (accountName.length < 3) {
+        return res.status(400).json({
+          success: false,
+          error: "Enter the GCash account name.",
+        });
+      }
+
+      if (postalCode !== "" && !/^\d{4}$/.test(postalCode)) {
+        return res.status(400).json({
+          success: false,
+          error: "Postal code must be a valid 4-digit Philippine postal code.",
+        });
+      }
+
+      const ref = db.collection("adminPayoutAccount").doc(ADMIN_PAYOUT_ID);
+      const existing = await ref.get();
+      const now = new Date();
+      const createdAt = existing.exists
+        ? existing.data()?.createdAt || now
+        : now;
+      const accountNumberMasked = maskGcashNumber(accountNumber);
+
+      const update = {
+        method: "gcash",
+        channel: "PH_GCASH",
+        accountName,
+        accountNumber,
+        accountNumberMasked,
+        status: "active",
+        createdAt,
+        updatedAt: now,
+      };
+      if (postalCode !== "") update.postalCode = postalCode;
+      if (city !== "") update.city = city;
+      if (province !== "") update.province = province;
+      if (street !== "") update.street = street;
+
+      await ref.set(update, { merge: true });
+
+      const saved = (await ref.get()).data() || {};
+
+      return res.json({
+        success: true,
+        payoutAccount: {
+          method: "gcash",
+          channel: "PH_GCASH",
+          accountName: saved.accountName || accountName,
+          postalCode: saved.postalCode || "",
+          city: saved.city || "",
+          province: saved.province || "",
+          street: saved.street || "",
+          accountNumberMasked: safeMaskGcashNumber(
+            saved.accountNumberMasked,
+            saved.accountNumber
+          ),
+          status: saved.status || "active",
+          createdAt: saved.createdAt || createdAt,
+          updatedAt: saved.updatedAt || now,
+        },
+      });
+    } catch (error) {
+      console.error("SAVE ADMIN PAYOUT ACCOUNT ERROR:", error);
+
+      return res.status(400).json({ success: false, error: error.message });
+    }
+  });
+
+  // Admin withdraw: check balance, hold in txn, Xendit payout with
+  // idempotency key, refund the hold only on definite rejection.
+  router.post("/admin/withdraw", async (req, res) => {
+    try {
+      await requireAdmin(req, auth, db);
+
+      const payoutAccountRef = db
+        .collection("adminPayoutAccount")
+        .doc(ADMIN_PAYOUT_ID);
+      const walletRef = db.collection("adminWallets").doc(ADMIN_WALLET_ID);
+
+      const payoutAccountSnap = await payoutAccountRef.get();
+
+      if (!payoutAccountSnap.exists) {
+        return res.status(400).json({
+          success: false,
+          error: "Please add the admin GCash payout account first.",
+        });
+      }
+
+      const payoutAccount = payoutAccountSnap.data() || {};
+      normalizeGcashNumber(payoutAccount.accountNumber);
+
+      const hasRequestedAmount =
+        req.body?.amount !== undefined && req.body?.amount !== null;
+      const requestedAmount = hasRequestedAmount
+        ? normalizeAmount(req.body.amount)
+        : null;
+
+      if (
+        hasRequestedAmount &&
+        (!Number.isFinite(requestedAmount) || requestedAmount <= 0)
+      ) {
+        return res
+          .status(400)
+          .json({ success: false, error: "Enter a valid withdrawal amount." });
+      }
+
+      const minimumWithdrawal = getMinimumWithdrawal();
+      const withdrawalRef = db.collection("adminWithdrawals").doc();
+      const withdrawalId = withdrawalRef.id;
+      const idempotencyKey = createIdempotencyKey("FG-AD-WD");
+      const referenceId = `FG-AD-WD-${withdrawalId}`;
+      const now = new Date();
+
+      const { amount, walletAfter } = await db.runTransaction(
+        async (transaction) => {
+          const walletSnap = await transaction.get(walletRef);
+          const wallet = sanitizeAdminWallet(
+            walletSnap.exists ? walletSnap.data() : {}
+          );
+          const withdrawable = getAdminWithdrawableAmount(wallet);
+          const amt = requestedAmount === null ? withdrawable : requestedAmount;
+
+          if (!Number.isFinite(amt) || amt <= 0) {
+            throw httpError(400, "No withdrawable balance is available.");
+          }
+          if (amt < minimumWithdrawal) {
+            throw httpError(
+              400,
+              `Minimum withdrawal is ₱${minimumWithdrawal.toFixed(2)}.`
+            );
+          }
+          if (amt > withdrawable + 0.001) {
+            throw httpError(
+              400,
+              `Maximum withdrawable amount is ₱${withdrawable.toFixed(2)}.`,
+              { withdrawableAmount: withdrawable }
+            );
+          }
+
+          const walletTxnRef = db.collection("adminWalletTransactions").doc();
+          const nextWallet = {
+            ...wallet,
+            pendingWithdrawal: roundMoney(wallet.pendingWithdrawal + amt),
+            updatedAt: now,
+          };
+
+          transaction.set(walletRef, nextWallet, { merge: true });
+          transaction.set(walletTxnRef, {
+            type: "withdrawal",
+            direction: "debit",
+            amount: amt,
+            balanceAfter: wallet.availableBalance,
+            reference: referenceId,
+            accountName: payoutAccount.accountName,
+            accountNumberMasked: safeMaskGcashNumber(
+              payoutAccount.accountNumberMasked,
+              payoutAccount.accountNumber
+            ),
+            withdrawalId,
+            status: "pending",
+            description: "Admin GCash withdrawal submitted to Xendit.",
+            createdAt: now,
+          });
+          transaction.set(withdrawalRef, {
+            amount: amt,
+            payoutFee: 0,
+            netAmount: amt,
+            payoutMethod: "gcash",
+            accountName: payoutAccount.accountName,
+            postalCode: payoutAccount.postalCode || "",
+            accountNumberMasked: safeMaskGcashNumber(
+              payoutAccount.accountNumberMasked,
+              payoutAccount.accountNumber
+            ),
+            status: "pending",
+            idempotencyKey,
+            xenditReferenceId: referenceId,
+            walletTransactionId: walletTxnRef.id,
+            requestedAt: now,
+            updatedAt: now,
+          });
+
+          return { amount: amt, walletAfter: nextWallet };
+        }
+      );
+
+      const buildWithdrawal = (status, extra = {}) => ({
+        id: withdrawalId,
+        amount,
+        payoutFee: 0,
+        netAmount: amount,
+        payoutMethod: "gcash",
+        accountName: payoutAccount.accountName,
+        accountNumberMasked: safeMaskGcashNumber(
+          payoutAccount.accountNumberMasked,
+          payoutAccount.accountNumber
+        ),
+        status,
+        idempotencyKey,
+        xenditReferenceId: referenceId,
+        requestedAt: now,
+        ...extra,
+      });
+
+      const withdrawableAfter = getAdminWithdrawableAmount(walletAfter);
+
+      let payout;
+      try {
+        payout = await adminPayoutRequest({
+          idempotencyKey,
+          referenceId,
+          payoutAccount,
+          amount,
+        });
+      } catch (payoutError) {
+        if (payoutError.ambiguous) {
+          await db.runTransaction(async (transaction) => {
+            const fresh = await transaction.get(withdrawalRef);
+            if (fresh.exists && (fresh.data() || {}).status === "pending") {
+              transaction.set(
+                withdrawalRef,
+                {
+                  status: "pending_review",
+                  failureReason:
+                    "Could not confirm the payout with Xendit. Funds stay held until it is resolved.",
+                  updatedAt: new Date(),
+                },
+                { merge: true }
+              );
+            }
+          });
+
+          console.error("ADMIN WITHDRAWAL NEEDS REVIEW:", {
+            withdrawalId,
+            referenceId,
+            message: payoutError.message,
+          });
+
+          return res.status(202).json({
+            success: true,
+            withdrawal: buildWithdrawal("pending_review"),
+            withdrawableAmount: withdrawableAfter,
+          });
+        }
+
+        await db.runTransaction(async (transaction) => {
+          const [freshWithdrawalSnap, freshWalletSnap] = await Promise.all([
+            transaction.get(withdrawalRef),
+            transaction.get(walletRef),
+          ]);
+
+          if (
+            !freshWithdrawalSnap.exists ||
+            (freshWithdrawalSnap.data() || {}).status !== "pending"
+          ) {
+            return;
+          }
+
+          const freshWallet = sanitizeAdminWallet(
+            freshWalletSnap.exists ? freshWalletSnap.data() : {}
+          );
+          const failedAt = new Date();
+
+          transaction.set(
+            walletRef,
+            {
+              ...freshWallet,
+              pendingWithdrawal: Math.max(
+                0,
+                roundMoney(freshWallet.pendingWithdrawal - amount)
+              ),
+              updatedAt: failedAt,
+            },
+            { merge: true }
+          );
+
+          const walletTransactionId = (freshWithdrawalSnap.data() || {})
+            .walletTransactionId;
+
+          if (walletTransactionId) {
+            transaction.set(
+              db.collection("adminWalletTransactions").doc(walletTransactionId),
+              {
+                status: "failed",
+                completedAt: failedAt,
+                description: "Admin GCash withdrawal failed; held amount released.",
+              },
+              { merge: true }
+            );
+          }
+
+          transaction.set(
+            withdrawalRef,
+            {
+              status: "failed",
+              failureCode: payoutError?.response?.error_code || null,
+              failureReason:
+                payoutError?.message || "Xendit payout request failed.",
+              failedAt,
+              updatedAt: failedAt,
+            },
+            { merge: true }
+          );
+        });
+
+        throw payoutError;
+      }
+
+      const finalStatus = await db.runTransaction(async (transaction) => {
+        const fresh = await transaction.get(withdrawalRef);
+        const current = fresh.exists ? fresh.data() || {} : {};
+
+        if (current.status !== "pending" && current.status !== "pending_review") {
+          return current.status || "processing";
+        }
+
+        transaction.set(
+          withdrawalRef,
+          {
+            status: "processing",
+            processingAt: new Date(),
+            xenditPayoutId: payout?.payout_id || payout?.id || null,
+            xenditReferenceId: payout?.reference_id || referenceId,
+            xenditStatus: payout?.status || "PENDING",
+            updatedAt: new Date(),
+          },
+          { merge: true }
+        );
+
+        return "processing";
+      });
+
+      return res.json({
+        success: true,
+        withdrawal: buildWithdrawal(finalStatus, {
+          xenditPayoutId: payout?.payout_id || payout?.id || null,
+          xenditReferenceId: payout?.reference_id || referenceId,
+          processingAt: new Date(),
+        }),
+        withdrawableAmount: withdrawableAfter,
+      });
+    } catch (error) {
+      console.error("ADMIN WITHDRAW ERROR:", error);
+
+      return res.status(error.status || 400).json({
+        success: false,
+        error: error.message || "Unable to process withdrawal.",
+        ...(error.withdrawableAmount !== undefined
+          ? { withdrawableAmount: error.withdrawableAmount }
+          : {}),
       });
     }
   });
@@ -2796,14 +3774,31 @@ const createWalletRouter = ({ db, auth, inventory }) => {
         referenceId: data?.reference_id,
       });
 
-      if (!withdrawalDoc) {
+      if (withdrawalDoc) {
+        await applyWithdrawalWebhook({ db, withdrawalDoc, data, event });
+
+        return res.status(200).json({ success: true });
+      }
+
+      const adminHit = await findAdminWithdrawal({
+        db,
+        payoutId: data?.payout_id,
+        referenceId: data?.reference_id,
+      });
+
+      if (!adminHit) {
         return res.status(200).json({
           success: true,
           message: "Webhook acknowledged. Withdrawal not found.",
         });
       }
 
-      await applyWithdrawalWebhook({ db, withdrawalDoc, data, event });
+      await applyAdminWithdrawalWebhook({
+        db,
+        withdrawalDoc: adminHit.doc,
+        data,
+        event,
+      });
 
       return res.status(200).json({ success: true });
     } catch (error) {
