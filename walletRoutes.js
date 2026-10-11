@@ -1,6 +1,10 @@
 const express = require("express");
 const crypto = require("crypto");
 const { FieldValue } = require("firebase-admin/firestore");
+const {
+  computeDeliveryForOrder,
+  DeliveryFeeError,
+} = require("./deliveryFee");
 
 /* =========================================================
    CONSTANTS
@@ -342,17 +346,14 @@ const adminPayoutRequest = async ({
       ""
   ).trim();
 
-  if (!payoutCity || !payoutProvince || !payoutStreet) {
-    throw new Error(
-      "A complete address (street, city, province) is required before an admin GCash payout can be sent."
-    );
-  }
-
-  if (!/^\d{4}$/.test(postalCode)) {
-    throw new Error(
-      "A valid 4-digit postal code is required before an admin GCash payout can be sent."
-    );
-  }
+  // Address is optional in the app (name + number only, like the farmer
+  // wallet). Send whatever is on file and let Xendit validate — its error
+  // details are surfaced to the UI.
+  const adminAddress = { country: "PH" };
+  if (payoutProvince) adminAddress.province_state = payoutProvince;
+  if (payoutCity) adminAddress.city = payoutCity;
+  if (payoutStreet) adminAddress.street_line_1 = payoutStreet;
+  if (/^\d{4}$/.test(postalCode)) adminAddress.postal_code = postalCode;
 
   return payoutRequest({
     idempotencyKey,
@@ -362,11 +363,12 @@ const adminPayoutRequest = async ({
     amount,
     user: {
       farmerId: ADMIN_LEDGER_ID,
-      payoutPostalCode: postalCode,
-      municipality: payoutCity,
-      province: payoutProvince,
-      street: payoutStreet,
+      payoutPostalCode: "",
+      municipality: "",
+      province: "",
+      street: "",
     },
+    addressOverride: adminAddress,
   });
 };
 
@@ -469,6 +471,9 @@ const getExpectedFarmerEarning = (order) => {
 
 /*
   Re-prices an order from the products collection (never trusts the client).
+  Delivery fee is recomputed from barangay centroids:
+  farm barangay from users/{farmerId}, buyer barangay from order.address.
+  Legacy orders with no barangay keep the fee already written.
   MUST be called inside a transaction BEFORE any transaction write.
 */
 const priceOrderOnServer = async (transaction, db, order) => {
@@ -541,12 +546,33 @@ const priceOrderOnServer = async (transaction, db, order) => {
 
   subtotal = roundMoney(subtotal);
 
-  const deliveryFee = order.delivery === "delivery" ? getDeliveryFee() : 0;
+  // Barangay-level delivery fee. Reads the farm profile inside the same
+  // transaction (read-before-write) and NEVER uses client-sent fee/distance.
+  // Throws DeliveryFeeError when the address can't be delivered to — the
+  // caller must keep the order pending and return a clear error.
+  let deliveryFee = 0;
+  let distanceKm = 0;
+  let deliveryTier = null;
+  let deliveryLegacy = false;
+
+  if (order.delivery === "delivery") {
+    const farmerRef = db.collection("users").doc(String(order.farmerId));
+    const farmerSnap = await transaction.get(farmerRef);
+    const farmerProfile = farmerSnap.exists ? farmerSnap.data() : {};
+    const computed = computeDeliveryForOrder({ farmerProfile, order });
+    deliveryFee = computed.deliveryFee;
+    distanceKm = computed.distanceKm;
+    deliveryTier = computed.tier;
+    deliveryLegacy = computed.legacy === true;
+  }
 
   return {
     products,
     subtotal,
     deliveryFee,
+    distanceKm,
+    deliveryTier,
+    deliveryLegacy,
     total: roundMoney(subtotal + deliveryFee),
   };
 };
@@ -651,6 +677,7 @@ const payoutRequest = async ({
   accountNumber,
   amount,
   user,
+  addressOverride = null,
 }) => {
   const secretKey = getEnv("XENDIT_PAYOUT_SECRET_KEY");
 
@@ -680,14 +707,14 @@ const payoutRequest = async ({
   // Postal code is optional in the app. An empty string makes Xendit
   // fail validation, so the field is omitted entirely when there is no
   // valid code on file (payout account, else farmer profile).
-  const address = {
+  const address = addressOverride || {
     country: "PH",
     province_state: payoutProvince,
     city: payoutCity,
     street_line_1: payoutStreet,
   };
 
-  if (/^\d{4}$/.test(postalCode)) {
+  if (!addressOverride && /^\d{4}$/.test(postalCode)) {
     address.postal_code = postalCode;
   }
 
