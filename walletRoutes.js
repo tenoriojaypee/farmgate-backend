@@ -319,7 +319,12 @@ const adminPayoutRequest = async ({
 }) => {
   const accountName = String(payoutAccount.accountName || "").trim();
   const postalCode = String(
-    payoutAccount.postalCode || profile.postalCode || ""
+    payoutAccount.postalCode ||
+      profile.postalCode ||
+      profile.postal_code ||
+      profile.zipCode ||
+      profile.zip ||
+      ""
   ).trim();
   const payoutCity = String(
     payoutAccount.city || profile.municipality || profile.city || ""
@@ -328,7 +333,13 @@ const adminPayoutRequest = async ({
     payoutAccount.province || profile.province || ""
   ).trim();
   const payoutStreet = String(
-    payoutAccount.street || profile.street || profile.location || profile.barangay || ""
+    payoutAccount.street ||
+      profile.street ||
+      profile.address ||
+      profile.addressLine ||
+      profile.location ||
+      profile.barangay ||
+      ""
   ).trim();
 
   if (!payoutCity || !payoutProvince || !payoutStreet) {
@@ -666,9 +677,19 @@ const payoutRequest = async ({
     );
   }
 
-  // Postal code is optional in the app. Whatever is on file (payout
-  // account, else farmer profile) is sent; Xendit validates it.
-  const postalCodeField = /^\d{4}$/.test(postalCode) ? postalCode : "";
+  // Postal code is optional in the app. An empty string makes Xendit
+  // fail validation, so the field is omitted entirely when there is no
+  // valid code on file (payout account, else farmer profile).
+  const address = {
+    country: "PH",
+    province_state: payoutProvince,
+    city: payoutCity,
+    street_line_1: payoutStreet,
+  };
+
+  if (/^\d{4}$/.test(postalCode)) {
+    address.postal_code = postalCode;
+  }
 
   const payload = {
     reference_id: referenceId,
@@ -683,13 +704,7 @@ const payoutRequest = async ({
         personal_mobile_number: `+63${normalizedGcash.slice(1)}`,
       },
 
-      address: {
-        country: "PH",
-        province_state: payoutProvince,
-        city: payoutCity,
-        street_line_1: payoutStreet,
-        postal_code: postalCodeField,
-      },
+      address,
 
       account_details: {
         currency: "PHP",
@@ -2944,6 +2959,9 @@ const createWalletRouter = ({ db, auth, inventory }) => {
       return res.status(error.status || 400).json({
         success: false,
         error: error.message || "Unable to process withdrawal.",
+        // Xendit validation details (which fields failed), so the app
+        // can show more than a generic message.
+        details: error.response || null,
         ...(error.withdrawableAmount !== undefined
           ? { withdrawableAmount: error.withdrawableAmount }
           : {}),
@@ -3703,6 +3721,7 @@ const createWalletRouter = ({ db, auth, inventory }) => {
       return res.status(error.status || 400).json({
         success: false,
         error: error.message || "Unable to process withdrawal.",
+        details: error.response || null,
         ...(error.withdrawableAmount !== undefined
           ? { withdrawableAmount: error.withdrawableAmount }
           : {}),
